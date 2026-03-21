@@ -5,6 +5,7 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   status: string;
+  source?: string; // "user" | "terminal" | "daemon" | "system"
   created_at: string;
 }
 

@@ -1,0 +1,13 @@
+{
+  "name": "react-native-supertonic-tts",
+  "version": "1.0.0",
+  "description": "React Native TurboModule wrapping Supertonic 2 TTS engine (ONNX-based, multilingual)",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "private": true,
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  }
+}

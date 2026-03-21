@@ -1,0 +1,28 @@
+apply plugin: "com.android.library"
+
+android {
+    namespace "com.supertonictts"
+    compileSdk rootProject.ext.has("compileSdkVersion") ? rootProject.ext.compileSdkVersion : 35
+
+    defaultConfig {
+        minSdk rootProject.ext.has("minSdkVersion") ? rootProject.ext.minSdkVersion : 24
+        targetSdk rootProject.ext.has("targetSdkVersion") ? rootProject.ext.targetSdkVersion : 35
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = ["src/main/java"]
+        }
+    }
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android:+"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:1.21.0"
+    implementation "com.fasterxml.jackson.core:jackson-databind:2.15.2"
+}

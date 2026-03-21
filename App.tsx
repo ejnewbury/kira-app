@@ -12,9 +12,14 @@ import {
   StatusBar,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { Audio } from "expo-av";
-import * as Speech from "expo-speech";
-import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
+import { sendMessage, getMessages, getConversations, getAgentChat, transcribeAudio, Message, AgentMessage } from "./lib/api";
+
+// Lazy imports — these need native modules, unavailable in Expo Go
+let Audio: any = null;
+let Speech: any = null;
+try { Audio = require("expo-av").Audio; } catch {}
+try { Speech = require("expo-speech"); } catch {}
+const HAS_VOICE = !!Audio && !!Speech;
 
 // Design tokens — dark, minimal, warm accent
 const BG = "#0D0D0D";
@@ -25,14 +30,20 @@ const TEXT_PRIMARY = "#F5F5F5";
 const TEXT_SECONDARY = "#999";
 const USER_BUBBLE = "#2A2A3A";
 const KIRA_BUBBLE = "#1E2A1E";
+const INTERNAL_BUBBLE = "#2A2420";
+
+type Tab = "chat" | "internal";
 
 function ChatScreen() {
   const insets = useSafeAreaInsets();
+  const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
+  const [internalMessages, setInternalMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+  const internalListRef = useRef<FlatList>(null);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMessageCountRef = useRef(0);
 
@@ -60,6 +71,20 @@ function ChatScreen() {
     };
   }, [conversationId]);
 
+  // Poll internal channel when on that tab
+  useEffect(() => {
+    if (activeTab !== "internal") return;
+    const pollInternal = async () => {
+      try {
+        const msgs = await getAgentChat(undefined, 50);
+        setInternalMessages(msgs); // newest first — inverted FlatList handles display order
+      } catch {}
+    };
+    pollInternal();
+    const interval = setInterval(pollInternal, 5000);
+    return () => clearInterval(interval);
+  }, [activeTab]);
+
   // Load most recent conversation on startup
   useEffect(() => {
     (async () => {
@@ -78,12 +103,7 @@ function ChatScreen() {
     })();
   }, []);
 
-  // Auto-scroll when new messages arrive
-  useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-    }
-  }, [messages.length]);
+  // (inverted FlatList auto-scrolls to newest messages)
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
@@ -138,14 +158,14 @@ function ChatScreen() {
   }, [conversationId]);
 
   // --- Voice ---
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [recording, setRecording] = useState<any>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const prevMessageCountRef = useRef(0);
 
   // Speak new assistant messages aloud
   useEffect(() => {
-    if (!ttsEnabled || messages.length === 0) return;
+    if (!HAS_VOICE || !ttsEnabled || messages.length === 0) return;
     if (messages.length > prevMessageCountRef.current) {
       const newMsgs = messages.slice(prevMessageCountRef.current);
       const lastAssistant = [...newMsgs].reverse().find(
@@ -163,6 +183,7 @@ function ChatScreen() {
   }, [messages.length, ttsEnabled]);
 
   const startRecording = useCallback(async () => {
+    if (!HAS_VOICE) return;
     try {
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) return;
@@ -233,7 +254,13 @@ function ChatScreen() {
           isUser ? styles.userBubble : styles.kiraBubble,
         ]}
       >
-        {!isUser && <Text style={styles.senderLabel}>Kira</Text>}
+        <Text style={styles.senderLabel}>
+          {isUser
+            ? "Eric"
+            : item.source === "terminal"
+            ? "Kira (Terminal)"
+            : "Kira (Phone)"}
+        </Text>
         <Text style={[styles.messageText, isPending && styles.pendingText]}>
           {item.content}
         </Text>
@@ -257,16 +284,13 @@ function ChatScreen() {
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.headerDot} />
-          <View>
-            <Text style={styles.headerTitle}>Kira</Text>
-            <Text style={styles.headerSubtitle}>Personal Assistant</Text>
-          </View>
+          <Text style={styles.headerTitle}>Kira</Text>
         </View>
         <View style={styles.headerButtons}>
           <Pressable onPress={syncMessages} style={styles.syncButton}>
             <Text style={styles.syncText}>↻</Text>
           </Pressable>
-          {conversationId && (
+          {conversationId && activeTab === "chat" && (
             <Pressable onPress={startNewConversation} style={styles.newChatButton}>
               <Text style={styles.newChatText}>+ New</Text>
             </Pressable>
@@ -274,27 +298,70 @@ function ChatScreen() {
         </View>
       </View>
 
-      {/* Messages */}
-      <FlatList
+      {/* Tab bar */}
+      <View style={styles.tabBar}>
+        <Pressable
+          onPress={() => setActiveTab("chat")}
+          style={[styles.tab, activeTab === "chat" && styles.activeTab]}
+        >
+          <Text style={[styles.tabText, activeTab === "chat" && styles.activeTabText]}>Chat</Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setActiveTab("internal")}
+          style={[styles.tab, activeTab === "internal" && styles.activeTab]}
+        >
+          <Text style={[styles.tabText, activeTab === "internal" && styles.activeTabText]}>Internal</Text>
+        </Pressable>
+      </View>
+
+      {/* Internal channel view */}
+      {activeTab === "internal" && (
+        <FlatList
+          ref={internalListRef}
+          data={[...internalMessages].reverse()}
+          inverted
+          renderItem={({ item }: { item: AgentMessage }) => (
+            <View style={[styles.messageBubble, styles.internalBubble]}>
+              <Text style={styles.internalSource}>
+                {item.source === "terminal" ? "Kira (Terminal)" : item.source === "daemon" ? "Kira (Phone)" : "System"}
+              </Text>
+              <Text style={styles.messageText}>{item.content}</Text>
+              <Text style={styles.internalTime}>
+                {new Date(item.created_at).toLocaleTimeString()}
+              </Text>
+            </View>
+          )}
+          keyExtractor={(item) => item.id}
+          style={styles.messageList}
+          contentContainerStyle={styles.messageListContent}
+          ListEmptyComponent={
+            <View style={[styles.emptyContainer, { transform: [{ scaleY: -1 }] }]}>
+              <Text style={styles.emptyTitle}>Internal Channel</Text>
+              <Text style={styles.emptySubtitle}>Agent-to-agent communication</Text>
+            </View>
+          }
+        />
+      )}
+
+      {/* Chat messages */}
+      {activeTab === "chat" && (<FlatList
         ref={flatListRef}
-        data={messages}
+        data={[...messages].reverse()}
+        inverted
         renderItem={renderMessage}
         keyExtractor={(item) => item.id}
         style={styles.messageList}
-        contentContainerStyle={[
-          styles.messageListContent,
-          messages.length === 0 && styles.emptyList,
-        ]}
+        contentContainerStyle={styles.messageListContent}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
+          <View style={[styles.emptyContainer, { transform: [{ scaleY: -1 }] }]}>
             <Text style={styles.emptyTitle}>Hey, Eric</Text>
             <Text style={styles.emptySubtitle}>What can I help you with?</Text>
           </View>
         }
-      />
+      />)}
 
-      {/* Thinking indicator */}
-      {isWaiting && (
+      {/* Thinking indicator — chat tab only */}
+      {activeTab === "chat" && isWaiting && (
         <View style={styles.typingContainer}>
           <ActivityIndicator size="small" color={ACCENT} />
           <Text style={styles.typingText}>Kira is thinking...</Text>
@@ -302,19 +369,22 @@ function ChatScreen() {
       )}
 
       {/* Input */}
-      <View style={[styles.inputContainer, { paddingBottom: insets.bottom + 8 }]}>
-        {/* TTS toggle */}
-        <Pressable
-          onPress={() => {
-            setTtsEnabled((v) => !v);
-            if (ttsEnabled) Speech.stop();
-          }}
-          style={styles.ttsToggle}
-        >
-          <Text style={[styles.ttsToggleText, !ttsEnabled && { opacity: 0.3 }]}>
-            {ttsEnabled ? "🔊" : "🔇"}
-          </Text>
-        </Pressable>
+      {/* Input — chat tab only */}
+      {activeTab === "chat" && (<View style={[styles.inputContainer, { paddingBottom: insets.bottom + 8 }]}>
+        {/* TTS toggle — only when voice modules available */}
+        {HAS_VOICE && (
+          <Pressable
+            onPress={() => {
+              setTtsEnabled((v) => !v);
+              if (ttsEnabled) Speech?.stop();
+            }}
+            style={styles.ttsToggle}
+          >
+            <Text style={[styles.ttsToggleText, !ttsEnabled && { opacity: 0.3 }]}>
+              {ttsEnabled ? "🔊" : "🔇"}
+            </Text>
+          </Pressable>
+        )}
 
         <TextInput
           style={styles.input}
@@ -348,7 +418,7 @@ function ChatScreen() {
             <Text style={styles.sendButtonText}>{isRecording ? "●" : "🎤"}</Text>
           </Pressable>
         )}
-      </View>
+      </View>)}
     </KeyboardAvoidingView>
   );
 }
@@ -540,5 +610,44 @@ const styles = StyleSheet.create({
   },
   ttsToggleText: {
     fontSize: 18,
+  },
+  tabBar: {
+    flexDirection: "row",
+    borderBottomWidth: 1,
+    borderBottomColor: SURFACE,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  activeTab: {
+    borderBottomWidth: 2,
+    borderBottomColor: ACCENT,
+  },
+  tabText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: TEXT_SECONDARY,
+  },
+  activeTabText: {
+    color: ACCENT,
+  },
+  internalBubble: {
+    alignSelf: "stretch",
+    backgroundColor: INTERNAL_BUBBLE,
+    borderRadius: 12,
+  },
+  internalSource: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: ACCENT,
+    marginBottom: 4,
+  },
+  internalTime: {
+    fontSize: 10,
+    color: TEXT_SECONDARY,
+    marginTop: 4,
+    alignSelf: "flex-end",
   },
 });

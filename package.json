@@ -12,11 +12,18 @@
     "@react-native-voice/voice": "^3.2.4",
     "@supabase/supabase-js": "^2.99.3",
     "expo": "~55.0.8",
+    "expo-asset": "~55.0.10",
     "expo-av": "^16.0.8",
+    "expo-build-properties": "~55.0.10",
+    "expo-dev-client": "~55.0.18",
+    "expo-file-system": "~55.0.11",
+    "expo-secure-store": "~55.0.9",
     "expo-speech": "~55.0.9",
     "expo-status-bar": "~55.0.4",
+    "onnxruntime-react-native": "^1.24.3",
     "react": "19.2.0",
     "react-native": "0.83.2",
+    "react-native-executorch": "^0.7.2",
     "react-native-safe-area-context": "~5.6.2"
   },
   "devDependencies": {
