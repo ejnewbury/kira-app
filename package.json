@@ -9,10 +9,15 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@react-native-voice/voice": "^3.2.4",
+    "@supabase/supabase-js": "^2.99.3",
     "expo": "~55.0.8",
+    "expo-av": "^16.0.8",
+    "expo-speech": "~55.0.9",
     "expo-status-bar": "~55.0.4",
     "react": "19.2.0",
-    "react-native": "0.83.2"
+    "react-native": "0.83.2",
+    "react-native-safe-area-context": "~5.6.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

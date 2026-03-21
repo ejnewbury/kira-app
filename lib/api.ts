@@ -47,6 +47,24 @@ export async function getConversations(): Promise<Conversation[]> {
   return data.conversations;
 }
 
+export async function transcribeAudio(uri: string): Promise<string> {
+  const formData = new FormData();
+  const filename = uri.split("/").pop() || "recording.m4a";
+  formData.append("audio", {
+    uri,
+    type: "audio/m4a",
+    name: filename,
+  } as any);
+
+  const res = await fetch(`${BACKEND_URL}/api/kira/transcribe`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`Transcribe failed: ${res.status}`);
+  const data = await res.json();
+  return data.text || "";
+}
+
 export interface AgentMessage {
   id: string;
   role: string;
