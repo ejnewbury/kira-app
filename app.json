@@ -38,8 +38,13 @@
             "compileSdkVersion": 36,
             "targetSdkVersion": 35,
             "minSdkVersion": 24,
+            "newArchEnabled": true,
             "enableProguardInReleaseBuilds": false,
-            "enableMinifyInReleaseBuilds": false
+            "enableMinifyInReleaseBuilds": false,
+            "kotlinVersion": "2.0.21",
+            "packagingOptions": {
+              "pickFirst": ["**/libc++_shared.so"]
+            }
           }
         }
       ]

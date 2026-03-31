@@ -12,14 +12,19 @@ import {
   StatusBar,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { sendMessage, getMessages, getConversations, getAgentChat, transcribeAudio, Message, AgentMessage } from "./lib/api";
+import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
+import { useVoiceMode, type VoiceState } from "./lib/useVoiceMode";
+import { pushConversationSummary, pullDesktopContext } from "./lib/context-sync";
+import { useRealtimeMessages } from "./lib/useRealtimeMessages";
+import KiraOrb from "./lib/KiraOrb";
+
+import * as PiperTTS from "./lib/piper-tts";
+import { registerForPushNotifications } from "./lib/notifications";
 
 // Lazy imports — these need native modules, unavailable in Expo Go
 let Audio: any = null;
-let Speech: any = null;
 try { Audio = require("expo-av").Audio; } catch {}
-try { Speech = require("expo-speech"); } catch {}
-const HAS_VOICE = !!Audio && !!Speech;
+const HAS_VOICE = !!Audio;
 
 // Design tokens — dark, minimal, warm accent
 const BG = "#0D0D0D";
@@ -30,62 +35,22 @@ const TEXT_PRIMARY = "#F5F5F5";
 const TEXT_SECONDARY = "#999";
 const USER_BUBBLE = "#2A2A3A";
 const KIRA_BUBBLE = "#1E2A1E";
-const INTERNAL_BUBBLE = "#2A2420";
-
-type Tab = "chat" | "internal";
+// Kira identity color — deep teal
+const KIRA_TEAL = "#2A9D8F";
 
 function ChatScreen() {
   const insets = useSafeAreaInsets();
-  const [activeTab, setActiveTab] = useState<Tab>("chat");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [internalMessages, setInternalMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const flatListRef = useRef<FlatList>(null);
-  const internalListRef = useRef<FlatList>(null);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastMessageCountRef = useRef(0);
 
-  // Always poll active conversation for new messages (incoming notifications + responses)
-  useEffect(() => {
-    if (!conversationId) return;
+  // Realtime subscription replaces polling — instant message delivery
+  useRealtimeMessages({ conversationId, setMessages });
 
-    const poll = async () => {
-      try {
-        const latest = await getMessages(conversationId);
-        // Only update state if messages actually changed
-        if (latest.length !== lastMessageCountRef.current) {
-          lastMessageCountRef.current = latest.length;
-          setMessages(latest);
-        }
-      } catch {
-        // Silently retry
-      }
-    };
-
-    pollIntervalRef.current = setInterval(poll, 3000);
-    poll();
-    return () => {
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
-    };
-  }, [conversationId]);
-
-  // Poll internal channel when on that tab
-  useEffect(() => {
-    if (activeTab !== "internal") return;
-    const pollInternal = async () => {
-      try {
-        const msgs = await getAgentChat(undefined, 50);
-        setInternalMessages(msgs); // newest first — inverted FlatList handles display order
-      } catch {}
-    };
-    pollInternal();
-    const interval = setInterval(pollInternal, 5000);
-    return () => clearInterval(interval);
-  }, [activeTab]);
-
-  // Load most recent conversation on startup
+  // Load most recent conversation + pull desktop context + register push on startup
+  const sessionStartRef = useRef(Date.now());
   useEffect(() => {
     (async () => {
       try {
@@ -93,15 +58,36 @@ function ChatScreen() {
         if (convos.length > 0) {
           const latest = convos[0];
           setConversationId(latest.id);
-          const msgs = await getMessages(latest.id);
-          lastMessageCountRef.current = msgs.length;
-          setMessages(msgs);
+          // Realtime hook handles initial fetch + subscription
         }
       } catch {
         // First launch, no conversations yet
       }
+
+      // Register for push notifications (non-blocking)
+      registerForPushNotifications().catch(() => {});
+
+      // Pull latest desktop context (non-blocking)
+      pullDesktopContext().then((events) => {
+        if (events.length > 0) {
+          console.log(`[ContextSync] Got ${events.length} desktop context events`);
+        }
+      }).catch(() => {});
     })();
   }, []);
+
+  // Push conversation summary when app goes to background or new chat starts
+  const pushSummaryIfNeeded = useCallback(() => {
+    if (messages.length > 2) {
+      const duration = Date.now() - sessionStartRef.current;
+      pushConversationSummary(
+        messages.map((m) => ({ role: m.role, content: m.content })),
+        duration,
+      ).then((ok) => {
+        if (ok) console.log("[ContextSync] Summary pushed to desktop");
+      }).catch(() => {});
+    }
+  }, [messages]);
 
   // (inverted FlatList auto-scrolls to newest messages)
 
@@ -125,102 +111,75 @@ function ChatScreen() {
     try {
       const result = await sendMessage(text, conversationId || undefined);
       setConversationId(result.conversationId);
-
-      // Replace temp message with real one
+      // Fetch messages immediately, then poll for assistant response
       const real = await getMessages(result.conversationId);
       setMessages(real);
+      setSending(false);
+      // Poll in background until assistant responds
+      pollForResponse(result.conversationId, real.length);
 
     } catch {
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempMsg.id),
         { ...tempMsg, content: `[Failed to send] ${text}`, status: "error" },
       ]);
-    } finally {
       setSending(false);
     }
-  }, [input, sending, conversationId]);
+  }, [input, sending, conversationId, pollForResponse]);
 
   const startNewConversation = useCallback(() => {
+    // Push summary of current conversation before starting new one
+    pushSummaryIfNeeded();
     setConversationId(null);
     setMessages([]);
-    lastMessageCountRef.current = 0;
-  }, []);
+    sessionStartRef.current = Date.now();
+  }, [pushSummaryIfNeeded]);
 
   const syncMessages = useCallback(async () => {
     if (!conversationId) return;
     try {
       const latest = await getMessages(conversationId);
-      lastMessageCountRef.current = latest.length;
       setMessages(latest);
     } catch {
       // Silently fail
     }
   }, [conversationId]);
 
-  // --- Voice ---
-  const [recording, setRecording] = useState<any>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [ttsEnabled, setTtsEnabled] = useState(true);
-  const prevMessageCountRef = useRef(0);
+  // Poll for assistant response after sending a message
+  // Terminal Kira can take >60s (desktop-poller + thinking + respond.sh),
+  // so we poll longer with backoff instead of giving up.
+  const pollForResponse = useCallback(async (convId: string, userMsgCount: number) => {
+    const INTERVALS = [
+      ...Array(15).fill(2000),   // First 30s: every 2s
+      ...Array(12).fill(5000),   // Next 60s: every 5s
+      ...Array(12).fill(10000),  // Next 120s: every 10s
+    ]; // Total: ~3.5 minutes of polling
 
-  // Speak new assistant messages aloud
-  useEffect(() => {
-    if (!HAS_VOICE || !ttsEnabled || messages.length === 0) return;
-    if (messages.length > prevMessageCountRef.current) {
-      const newMsgs = messages.slice(prevMessageCountRef.current);
-      const lastAssistant = [...newMsgs].reverse().find(
-        (m) => m.role === "assistant" && m.status === "complete"
-      );
-      if (lastAssistant) {
-        Speech.speak(lastAssistant.content, {
-          language: "en-US",
-          rate: 1.0,
-          pitch: 1.0,
-        });
+    for (const interval of INTERVALS) {
+      await new Promise((r) => setTimeout(r, interval));
+      try {
+        const msgs = await getMessages(convId);
+        setMessages(msgs);
+        // Check if we got an assistant response
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.role === "assistant" && lastMsg?.status === "complete") {
+          return; // Got the response
+        }
+      } catch {
+        // Network blip, keep trying
       }
-    }
-    prevMessageCountRef.current = messages.length;
-  }, [messages.length, ttsEnabled]);
-
-  const startRecording = useCallback(async () => {
-    if (!HAS_VOICE) return;
-    try {
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) return;
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-
-      const { recording: rec } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      setRecording(rec);
-      setIsRecording(true);
-    } catch {
-      // Permission denied or recording failed
     }
   }, []);
 
-  const stopRecordingAndSend = useCallback(async () => {
-    if (!recording) return;
-    setIsRecording(false);
+  // --- Voice Mode ---
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [isHandsFree, setIsHandsFree] = useState(false);
+  const prevMessageCountRef = useRef(0);
 
-    try {
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecording(null);
-
-      if (!uri) return;
-
-      // Transcribe via backend
-      const text = await transcribeAudio(uri);
-      if (!text || !text.trim()) return;
-
-      // Put transcription in input and send
-      setInput(text);
-      // Send directly
+  // Hands-free voice mode with adaptive VAD
+  const voiceMode = useVoiceMode({
+    onTranscription: async (text) => {
+      // Auto-send transcribed speech
       setSending(true);
       const tempMsg: Message = {
         id: `temp-${Date.now()}`,
@@ -231,16 +190,85 @@ function ChatScreen() {
       };
       setMessages((prev) => [...prev, tempMsg]);
 
+      try {
+        const result = await sendMessage(text, conversationId || undefined);
+        setConversationId(result.conversationId);
+        const real = await getMessages(result.conversationId);
+        setMessages(real);
+        setSending(false);
+        pollForResponse(result.conversationId, real.length);
+      } catch {
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== tempMsg.id),
+          { ...tempMsg, content: `[Failed] ${text}`, status: "error" },
+        ]);
+        setSending(false);
+      }
+    },
+  });
+
+  // Speak new assistant messages aloud
+  useEffect(() => {
+    if (!ttsEnabled || messages.length === 0) return;
+    if (messages.length > prevMessageCountRef.current) {
+      const newMsgs = messages.slice(prevMessageCountRef.current);
+      const lastAssistant = [...newMsgs].reverse().find(
+        (m) => m.role === "assistant" && m.status === "complete"
+      );
+      if (lastAssistant) {
+        voiceMode.speak(lastAssistant.content);
+      }
+    }
+    prevMessageCountRef.current = messages.length;
+  }, [messages.length, ttsEnabled]);
+
+  // Toggle hands-free voice mode
+  const toggleHandsFree = useCallback(() => {
+    if (isHandsFree) {
+      voiceMode.stop();
+      setIsHandsFree(false);
+    } else {
+      voiceMode.start();
+      setIsHandsFree(true);
+    }
+  }, [isHandsFree, voiceMode]);
+
+  // Legacy hold-to-talk (fallback)
+  const [recording, setRecording] = useState<any>(null);
+  const [isRecording, setIsRecording] = useState(false);
+
+  const startRecording = useCallback(async () => {
+    if (!Audio) return;
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) return;
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording: rec } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      setRecording(rec);
+      setIsRecording(true);
+    } catch {}
+  }, []);
+
+  const stopRecordingAndSend = useCallback(async () => {
+    if (!recording) return;
+    setIsRecording(false);
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecording(null);
+      if (!uri) return;
+      const text = await transcribeAudio(uri);
+      if (!text?.trim()) return;
+      setSending(true);
+      const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: text, status: "pending", created_at: new Date().toISOString() };
+      setMessages((prev) => [...prev, tempMsg]);
       const result = await sendMessage(text, conversationId || undefined);
       setConversationId(result.conversationId);
       const real = await getMessages(result.conversationId);
       setMessages(real);
       setInput("");
       setSending(false);
-    } catch {
-      setRecording(null);
-      setSending(false);
-    }
+    } catch { setRecording(null); setSending(false); }
   }, [recording, conversationId]);
 
   const renderMessage = useCallback(({ item }: { item: Message }) => {
@@ -268,10 +296,14 @@ function ChatScreen() {
     );
   }, []);
 
-  const isWaiting =
-    messages.some(
-      (m) => m.role === "user" && (m.status === "pending" || m.status === "processing")
-    );
+  // Show "thinking" only if the LAST message is a user message that hasn't been answered.
+  // Also check: if any assistant message exists AFTER the last user message, we're not waiting.
+  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+  const lastUserIdx = messages.length > 0 ? [...messages].reverse().findIndex((m) => m.role === "user") : -1;
+  const lastAssistantIdx = messages.length > 0 ? [...messages].reverse().findIndex((m) => m.role === "assistant") : -1;
+  const hasUnrespondedUser = lastMsg?.role === "user" && (lastMsg?.status === "pending" || lastMsg?.status === "processing");
+  const assistantCameAfter = lastAssistantIdx !== -1 && lastAssistantIdx < lastUserIdx;
+  const isWaiting = hasUnrespondedUser && !assistantCameAfter;
 
   return (
     <KeyboardAvoidingView
@@ -280,71 +312,60 @@ function ChatScreen() {
     >
       <StatusBar barStyle="light-content" backgroundColor={BG} />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={styles.headerDot} />
-          <Text style={styles.headerTitle}>Kira</Text>
-        </View>
-        <View style={styles.headerButtons}>
-          <Pressable onPress={syncMessages} style={styles.syncButton}>
-            <Text style={styles.syncText}>↻</Text>
-          </Pressable>
-          {conversationId && activeTab === "chat" && (
-            <Pressable onPress={startNewConversation} style={styles.newChatButton}>
-              <Text style={styles.newChatText}>+ New</Text>
+      {/* ===== FULL-SCREEN VOICE CALL MODE ===== */}
+      {isHandsFree ? (
+        <View style={styles.voiceCallContainer}>
+          <KiraOrb
+            state={
+              voiceMode.state === 'speaking' ? 'playing'
+                : voiceMode.state === 'recording' ? 'speechDetected'
+                : voiceMode.state === 'thinking' ? 'thinking'
+                : 'listening'
+            }
+            audioLevel={voiceMode.audioLevel}
+          />
+          {/* Overlay: status + end call */}
+          <View style={styles.voiceCallOverlay} pointerEvents="box-none">
+            <Text style={styles.voiceCallStatus}>
+              {voiceMode.state === 'listening' ? 'Listening'
+                : voiceMode.state === 'recording' ? 'Hearing you...'
+                : voiceMode.state === 'transcribing' ? 'Processing...'
+                : voiceMode.state === 'speaking' ? 'Speaking'
+                : voiceMode.state === 'thinking' ? 'Thinking...'
+                : 'Connected'}
+            </Text>
+            <Pressable
+              onPress={() => { voiceMode.stop(); setIsHandsFree(false); }}
+              style={styles.endCallButton}
+            >
+              <Text style={styles.endCallText}>End</Text>
             </Pressable>
-          )}
+          </View>
         </View>
-      </View>
-
-      {/* Tab bar */}
-      <View style={styles.tabBar}>
-        <Pressable
-          onPress={() => setActiveTab("chat")}
-          style={[styles.tab, activeTab === "chat" && styles.activeTab]}
-        >
-          <Text style={[styles.tabText, activeTab === "chat" && styles.activeTabText]}>Chat</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => setActiveTab("internal")}
-          style={[styles.tab, activeTab === "internal" && styles.activeTab]}
-        >
-          <Text style={[styles.tabText, activeTab === "internal" && styles.activeTabText]}>Internal</Text>
-        </Pressable>
-      </View>
-
-      {/* Internal channel view */}
-      {activeTab === "internal" && (
-        <FlatList
-          ref={internalListRef}
-          data={[...internalMessages].reverse()}
-          inverted
-          renderItem={({ item }: { item: AgentMessage }) => (
-            <View style={[styles.messageBubble, styles.internalBubble]}>
-              <Text style={styles.internalSource}>
-                {item.source === "terminal" ? "Kira (Terminal)" : item.source === "daemon" ? "Kira (Phone)" : "System"}
-              </Text>
-              <Text style={styles.messageText}>{item.content}</Text>
-              <Text style={styles.internalTime}>
-                {new Date(item.created_at).toLocaleTimeString()}
-              </Text>
-            </View>
-          )}
-          keyExtractor={(item) => item.id}
-          style={styles.messageList}
-          contentContainerStyle={styles.messageListContent}
-          ListEmptyComponent={
-            <View style={[styles.emptyContainer, { transform: [{ scaleY: -1 }] }]}>
-              <Text style={styles.emptyTitle}>Internal Channel</Text>
-              <Text style={styles.emptySubtitle}>Agent-to-agent communication</Text>
-            </View>
-          }
-        />
+      ) : (
+        <>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.headerLeft}>
+            <View style={styles.headerDot} />
+            <Text style={styles.headerTitle}>Kira</Text>
+          </View>
+          <View style={styles.headerButtons}>
+            <Pressable onPress={syncMessages} style={styles.syncButton}>
+              <Text style={styles.syncText}>↻</Text>
+            </Pressable>
+            {conversationId && (
+              <Pressable onPress={startNewConversation} style={styles.newChatButton}>
+                <Text style={styles.newChatText}>+ New</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+      </>
       )}
 
       {/* Chat messages */}
-      {activeTab === "chat" && (<FlatList
+      {!isHandsFree && (<FlatList
         ref={flatListRef}
         data={[...messages].reverse()}
         inverted
@@ -360,8 +381,8 @@ function ChatScreen() {
         }
       />)}
 
-      {/* Thinking indicator — chat tab only */}
-      {activeTab === "chat" && isWaiting && (
+      {/* Thinking indicator */}
+      {!isHandsFree && isWaiting && (
         <View style={styles.typingContainer}>
           <ActivityIndicator size="small" color={ACCENT} />
           <Text style={styles.typingText}>Kira is thinking...</Text>
@@ -369,22 +390,38 @@ function ChatScreen() {
       )}
 
       {/* Input */}
-      {/* Input — chat tab only */}
-      {activeTab === "chat" && (<View style={[styles.inputContainer, { paddingBottom: insets.bottom + 8 }]}>
-        {/* TTS toggle — only when voice modules available */}
-        {HAS_VOICE && (
-          <Pressable
-            onPress={() => {
-              setTtsEnabled((v) => !v);
-              if (ttsEnabled) Speech?.stop();
-            }}
-            style={styles.ttsToggle}
-          >
-            <Text style={[styles.ttsToggleText, !ttsEnabled && { opacity: 0.3 }]}>
-              {ttsEnabled ? "🔊" : "🔇"}
-            </Text>
-          </Pressable>
-        )}
+      {!isHandsFree && (<View style={[styles.inputContainer, { paddingBottom: insets.bottom + 8 }]}>
+        {/* TTS auto-play toggle */}
+        <Pressable
+          onPress={() => {
+            setTtsEnabled((v) => !v);
+            if (ttsEnabled) PiperTTS.stop();
+          }}
+          style={styles.ttsToggle}
+        >
+          <Text style={[styles.ttsToggleText, !ttsEnabled && { opacity: 0.3 }]}>
+            {ttsEnabled ? "🔊" : "🔇"}
+          </Text>
+        </Pressable>
+
+        {/* Voice call button — waveform icon */}
+        <Pressable
+          onPress={toggleHandsFree}
+          style={styles.voiceCallButton}
+        >
+          {/* Mini waveform bars icon */}
+          <View style={styles.waveformIcon}>
+            {[0.4, 0.7, 1.0, 0.7, 0.4].map((h, i) => (
+              <View
+                key={i}
+                style={[
+                  styles.waveformBar,
+                  { height: 16 * h },
+                ]}
+              />
+            ))}
+          </View>
+        </Pressable>
 
         <TextInput
           style={styles.input}
@@ -454,7 +491,7 @@ const styles = StyleSheet.create({
     width: 10,
     height: 10,
     borderRadius: 5,
-    backgroundColor: ACCENT,
+    backgroundColor: KIRA_TEAL,
   },
   headerTitle: {
     fontSize: 20,
@@ -611,43 +648,63 @@ const styles = StyleSheet.create({
   ttsToggleText: {
     fontSize: 18,
   },
-  tabBar: {
-    flexDirection: "row",
-    borderBottomWidth: 1,
-    borderBottomColor: SURFACE,
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 10,
+  // Voice call button (waveform icon)
+  voiceCallButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: KIRA_TEAL + "20",
+    borderWidth: 1,
+    borderColor: KIRA_TEAL + "40",
     alignItems: "center",
+    justifyContent: "center",
   },
-  activeTab: {
-    borderBottomWidth: 2,
-    borderBottomColor: ACCENT,
+  waveformIcon: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
   },
-  tabText: {
+  waveformBar: {
+    width: 3,
+    borderRadius: 1.5,
+    backgroundColor: KIRA_TEAL,
+  },
+  // Full-screen voice call mode
+  voiceCallContainer: {
+    flex: 1,
+    backgroundColor: "#0A0A0F",
+  },
+  voiceCallOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-end",
+    alignItems: "center",
+    paddingBottom: 80,
+  },
+  voiceCallStatus: {
+    color: "#667",
     fontSize: 14,
     fontWeight: "600",
-    color: TEXT_SECONDARY,
+    letterSpacing: 2,
+    textTransform: "uppercase",
+    marginBottom: 24,
   },
-  activeTabText: {
-    color: ACCENT,
+  endCallButton: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: "#C0392B",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#C0392B",
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  internalBubble: {
-    alignSelf: "stretch",
-    backgroundColor: INTERNAL_BUBBLE,
-    borderRadius: 12,
-  },
-  internalSource: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: ACCENT,
-    marginBottom: 4,
-  },
-  internalTime: {
-    fontSize: 10,
-    color: TEXT_SECONDARY,
-    marginTop: 4,
-    alignSelf: "flex-end",
+  endCallText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+    letterSpacing: 1,
   },
 });
