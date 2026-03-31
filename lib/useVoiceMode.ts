@@ -193,26 +193,83 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
     const frames = rawAudioRef.current;
     rawAudioRef.current = [];
 
+    if (frames.length === 0) {
+      if (isActiveRef.current) setVoiceState("listening");
+      return;
+    }
+
     setVoiceState("transcribing");
 
-    const text = await transcribeLocal(frames);
-    console.log("[VoiceMode] Whisper result:", JSON.stringify(text?.slice(0, 100)));
-    // Filter out Whisper hallucination tokens and scene descriptions
-    const cleaned = text
-      ?.replace(/\[.*?\]/g, "")          // [BLANK_AUDIO], [BELL], [MUSIC], [NOISE], etc.
-      ?.replace(/\(.*?\)/g, "")          // (blank audio), (bell ringing), etc.
-      ?.replace(/♪.*?♪/g, "")           // ♪ music ♪
-      ?.replace(/\*.*?\*/g, "")          // *sounds*
-      ?.trim();
-    if (cleaned && cleaned.length > 3) { // Require at least a few real characters
-      onTranscriptionRef.current(cleaned);
-    } else {
-      console.log("[VoiceMode] Whisper returned empty/blank — audio may be corrupted");
+    // Concatenate raw PCM frames
+    const totalSamples = frames.reduce((sum, f) => sum + f.length, 0);
+    const totalSeconds = totalSamples / 16000;
+    console.log(`[VoiceMode] Transcribing ${totalSeconds.toFixed(1)}s via API...`);
+
+    if (totalSeconds < 0.5) {
+      console.log("[VoiceMode] Too short, skipping");
+      resetSileroState();
+      if (isActiveRef.current) setVoiceState("listening");
+      return;
+    }
+
+    // Encode Float32 PCM → Int16 → WAV → base64 for API
+    const int16 = new Int16Array(totalSamples);
+    let offset = 0;
+    for (const frame of frames) {
+      for (let i = 0; i < frame.length; i++) {
+        int16[offset++] = Math.max(-32768, Math.min(32767, Math.round(frame[i] * 32767)));
+      }
+    }
+
+    // WAV header
+    const wavBuffer = new ArrayBuffer(44 + int16.length * 2);
+    const view = new DataView(wavBuffer);
+    const writeStr = (o: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + int16.length * 2, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, 16000, true); // sample rate
+    view.setUint32(28, 32000, true); // byte rate
+    view.setUint16(32, 2, true); // block align
+    view.setUint16(34, 16, true); // bits per sample
+    writeStr(36, "data");
+    view.setUint32(40, int16.length * 2, true);
+    new Int16Array(wavBuffer, 44).set(int16);
+
+    // Base64 encode
+    const bytes = new Uint8Array(wavBuffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
+
+    try {
+      const url = backendUrl || "https://kira-backend-six.vercel.app";
+      const res = await fetch(`${url}/api/kira/transcribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: base64, format: "wav" }),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const data = await res.json();
+      const text = data.text?.trim();
+      console.log("[VoiceMode] API transcription:", JSON.stringify(text?.slice(0, 100)));
+
+      if (text && text.length > 1) {
+        onTranscriptionRef.current(text);
+      } else {
+        console.log("[VoiceMode] API returned empty");
+      }
+    } catch (e: any) {
+      console.warn("[VoiceMode] API transcription failed:", e.message);
     }
 
     resetSileroState();
     if (isActiveRef.current) setVoiceState("listening");
-  }, [transcribeLocal, setVoiceState]);
+  }, [setVoiceState, backendUrl]);
 
   const processChunk = useCallback(async (pcm: Float32Array) => {
     if (!isActiveRef.current) return;
@@ -507,12 +564,45 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
   }, [setVoiceState]);
 
   const speak = useCallback(async (text: string) => {
+    // Stop recording before TTS to avoid audio conflict
+    if (audioStudio) {
+      try { audioStudio.stopRecording(); } catch {}
+    }
     setVoiceState("speaking");
     try {
       await PiperTTS.speak(text);
     } catch {}
-    setVoiceState(isActiveRef.current ? "listening" : "idle");
-  }, [setVoiceState]);
+
+    // Restart recording after TTS finishes — TTS kills the audio session
+    if (isActiveRef.current && audioStudio) {
+      setVoiceState("listening");
+      resetSileroState();
+      speechFramesRef.current = 0;
+      silenceFramesRef.current = 0;
+      isSpeechRef.current = false;
+      rawAudioRef.current = [];
+      frameAccRef.current = new Float32Array(0);
+      try {
+        await audioStudio.startRecording({
+          sampleRate: 16000,
+          channels: 1,
+          encoding: "pcm_16bit",
+          interval: 100,
+          onAudioStream: async (event: any) => {
+            if (!isActiveRef.current) return;
+            const int16 = base64ToInt16Array(event.data as string);
+            const float32 = int16ToFloat32(int16);
+            processChunk(float32);
+          },
+        });
+        console.log("[VoiceMode] Recording restarted after TTS");
+      } catch (e: any) {
+        console.warn("[VoiceMode] Failed to restart recording:", e.message);
+      }
+    } else {
+      setVoiceState(isActiveRef.current ? "listening" : "idle");
+    }
+  }, [setVoiceState, audioStudio, processChunk]);
 
   const stopSpeaking = useCallback(() => {
     PiperTTS.stop();

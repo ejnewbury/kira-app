@@ -217,11 +217,7 @@ function ChatScreen() {
       prevMessageCountRef.current = messages.length;
       return;
     }
-    // Don't auto-speak during hands-free voice mode — voice mode handles its own TTS
-    if (isHandsFree) {
-      prevMessageCountRef.current = messages.length;
-      return;
-    }
+    // During hands-free, still speak NEW assistant responses — that's the whole point
     if (messages.length > prevMessageCountRef.current) {
       const newMsgs = messages.slice(prevMessageCountRef.current);
       const lastAssistant = [...newMsgs].reverse().find(
