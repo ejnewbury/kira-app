@@ -207,9 +207,21 @@ function ChatScreen() {
     },
   });
 
-  // Speak new assistant messages aloud
+  // Speak new assistant messages aloud — but NOT during voice mode or initial load
+  const hasInitialLoadRef = useRef(false);
   useEffect(() => {
     if (!ttsEnabled || messages.length === 0) return;
+    // Skip the initial message load — don't speak old messages
+    if (!hasInitialLoadRef.current) {
+      hasInitialLoadRef.current = true;
+      prevMessageCountRef.current = messages.length;
+      return;
+    }
+    // Don't auto-speak during hands-free voice mode — voice mode handles its own TTS
+    if (isHandsFree) {
+      prevMessageCountRef.current = messages.length;
+      return;
+    }
     if (messages.length > prevMessageCountRef.current) {
       const newMsgs = messages.slice(prevMessageCountRef.current);
       const lastAssistant = [...newMsgs].reverse().find(
@@ -220,7 +232,7 @@ function ChatScreen() {
       }
     }
     prevMessageCountRef.current = messages.length;
-  }, [messages.length, ttsEnabled]);
+  }, [messages.length, ttsEnabled, isHandsFree]);
 
   // Toggle hands-free voice mode
   const toggleHandsFree = useCallback(() => {
@@ -228,6 +240,11 @@ function ChatScreen() {
       voiceMode.stop();
       setIsHandsFree(false);
     } else {
+      // Stop any playing audio and mute notifications before entering voice mode
+      voiceMode.stopSpeaking();
+      PiperTTS.stop();
+      // Mute notification sounds to prevent internal audio loopback triggering VAD
+      try { Audio?.setAudioModeAsync({ staysActiveInBackground: true, shouldDuckAndroid: true }); } catch {}
       voiceMode.start();
       setIsHandsFree(true);
     }

@@ -50,12 +50,12 @@ const palettes={
   thinking:{r:107,g:125,b:179,glow:0.04,ring:0.15,core:0.06,exit:0.05}
 };
 
-let liveAmp=0;
+let liveAmp=0,targetAmp=0;
 function handleMsg(e){
   try{
     const d=JSON.parse(e.data);
     if(d.state&&palettes[d.state]){state=d.state;tp=palettes[d.state]}
-    if(d.amplitude!==undefined){liveAmp=d.amplitude}
+    if(d.amplitude!==undefined){targetAmp=d.amplitude}
   }catch{}
 }
 window.addEventListener('message',handleMsg);
@@ -83,36 +83,65 @@ function getWaveY(x,layer,time){
 
 function draw(){
   t+=0.016;
+  // Smooth amplitude — fast attack, slow decay for organic feel
+  if(targetAmp>liveAmp){liveAmp+=(targetAmp-liveAmp)*0.3}
+  else{liveAmp+=(targetAmp-liveAmp)*0.08}
   ctx.clearRect(0,0,W,H);
   cp=lerpP(cp,tp,0.04);
   const p=cp;
   const R=Math.round(p.r),G=Math.round(p.g),B=Math.round(p.b);
   const cx=W/2,cy=H/2;
   const orbR=Math.min(W,H)*0.18;
-  const baseAmp=state==='speaking'?orbR*0.25:state==='listening'?orbR*0.1:state==='thinking'?orbR*0.1:orbR*0.04;
-  const amp=baseAmp+liveAmp*orbR*2.5;
+  const baseAmp=state==='speaking'?orbR*0.25:state==='listening'?orbR*0.12:state==='thinking'?orbR*0.1:orbR*0.04;
+  const amp=baseAmp+liveAmp*orbR*3.5;
   const wL=cx-orbR*3,wR=cx+orbR*3,wW=wR-wL;
 
-  // Background glow
-  const bg=ctx.createRadialGradient(cx,cy,orbR*0.3,cx,cy,orbR*2.5);
-  bg.addColorStop(0,'rgba('+R+','+G+','+B+','+(p.glow*1.5)+')');
-  bg.addColorStop(0.5,'rgba('+R+','+G+','+B+','+p.glow+')');
+  // Background glow — pulses with voice amplitude
+  const glowBoost=liveAmp*0.12;
+  const bgSpread=orbR*(2.5+liveAmp*1.5);
+  const bg=ctx.createRadialGradient(cx,cy,orbR*0.3,cx,cy,bgSpread);
+  bg.addColorStop(0,'rgba('+R+','+G+','+B+','+(p.glow*1.5+glowBoost)+')');
+  bg.addColorStop(0.5,'rgba('+R+','+G+','+B+','+(p.glow+glowBoost*0.5)+')');
   bg.addColorStop(1,'rgba('+(R>>1)+','+(G>>1)+','+(B>>1)+',0)');
   ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
 
-  // Orb fill
-  const og=ctx.createRadialGradient(cx,cy-orbR*0.15,orbR*0.1,cx,cy,orbR);
-  og.addColorStop(0,'rgba('+Math.min(255,R+60)+','+Math.min(255,G+40)+','+Math.min(255,B+30)+','+(p.core*0.8)+')');
-  og.addColorStop(0.5,'rgba('+R+','+G+','+B+','+(p.core*0.4)+')');
-  og.addColorStop(1,'rgba('+(R>>1)+','+(G>>1)+','+(B>>1)+','+(p.core*0.1)+')');
-  ctx.beginPath();ctx.arc(cx,cy,orbR,0,Math.PI*2);ctx.fillStyle=og;ctx.fill();
+  // Orb fill — core glow scales dramatically with audio amplitude
+  const amp2=liveAmp*liveAmp; // Square for more dramatic response
+  const coreBoost=liveAmp*0.8;
+  const coreAlpha=Math.min(0.98,p.core*1.2+coreBoost);
+  const coreR=Math.min(255,R+80+Math.round(liveAmp*175));
+  const coreG=Math.min(255,G+60+Math.round(liveAmp*120));
+  const coreB=Math.min(255,B+40+Math.round(liveAmp*90));
+  const midR=Math.min(255,R+Math.round(liveAmp*100));
+  const midG=Math.min(255,G+Math.round(liveAmp*70));
+  const midB=Math.min(255,B+Math.round(liveAmp*50));
+  const orbScale=1+liveAmp*0.12;
+  const og=ctx.createRadialGradient(cx,cy-orbR*0.1,orbR*0.02,cx,cy,orbR*orbScale);
+  og.addColorStop(0,'rgba('+coreR+','+coreG+','+coreB+','+coreAlpha+')');
+  og.addColorStop(0.25,'rgba('+coreR+','+coreG+','+coreB+','+(coreAlpha*0.7)+')');
+  og.addColorStop(0.5,'rgba('+midR+','+midG+','+midB+','+(p.core*0.6+coreBoost*0.5)+')');
+  og.addColorStop(0.75,'rgba('+R+','+G+','+B+','+(p.core*0.3+coreBoost*0.2)+')');
+  og.addColorStop(1,'rgba('+(R>>1)+','+(G>>1)+','+(B>>1)+','+(p.core*0.05)+')');
+  ctx.beginPath();ctx.arc(cx,cy,orbR*orbScale,0,Math.PI*2);ctx.fillStyle=og;ctx.fill();
+
+  // Inner bright hotspot — white-ish center that flares with voice
+  if(liveAmp>0.05){
+    const hotAlpha=Math.min(0.4,amp2*0.8);
+    const hot=ctx.createRadialGradient(cx,cy-orbR*0.05,0,cx,cy,orbR*0.4);
+    hot.addColorStop(0,'rgba('+Math.min(255,coreR+50)+','+Math.min(255,coreG+50)+','+Math.min(255,coreB+40)+','+hotAlpha+')');
+    hot.addColorStop(0.5,'rgba('+coreR+','+coreG+','+coreB+','+(hotAlpha*0.3)+')');
+    hot.addColorStop(1,'rgba('+R+','+G+','+B+',0)');
+    ctx.beginPath();ctx.arc(cx,cy,orbR*0.4,0,Math.PI*2);ctx.fillStyle=hot;ctx.fill();
+  }
 
   // Orb rings
-  const breathe=1+Math.sin(t*1.2)*(state==='idle'?0.005:0.012);
+  const breathe=1+Math.sin(t*1.2)*(state==='idle'?0.005:0.012)+liveAmp*0.04;
+  const ringAlpha=Math.min(0.9,p.ring+liveAmp*0.4);
+  const ringWidth=1.5+liveAmp*3;
   ctx.beginPath();ctx.arc(cx,cy,orbR*breathe,0,Math.PI*2);
-  ctx.strokeStyle='rgba('+R+','+G+','+B+','+p.ring+')';ctx.lineWidth=1.5;ctx.stroke();
-  ctx.beginPath();ctx.arc(cx,cy,orbR*breathe*1.02,0,Math.PI*2);
-  ctx.strokeStyle='rgba('+R+','+G+','+B+','+(p.ring*0.3)+')';ctx.lineWidth=0.8;ctx.stroke();
+  ctx.strokeStyle='rgba('+Math.min(255,R+Math.round(liveAmp*60))+','+Math.min(255,G+Math.round(liveAmp*40))+','+Math.min(255,B+Math.round(liveAmp*30))+','+ringAlpha+')';ctx.lineWidth=ringWidth;ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,orbR*breathe*1.03,0,Math.PI*2);
+  ctx.strokeStyle='rgba('+R+','+G+','+B+','+(ringAlpha*0.3)+')';ctx.lineWidth=ringWidth*0.5;ctx.stroke();
 
   // Wave layers outside orb
   for(let layer=LAYERS-1;layer>=0;layer--){
@@ -224,14 +253,11 @@ export default function KiraOrb({ state, audioLevel = 0 }: KiraOrbProps) {
     webViewRef.current?.postMessage(JSON.stringify({ state: orbState }));
   }, [orbState]);
 
-  // Stream audio level to WebView at ~20fps
+  // Stream audio level to WebView at ~30fps — always send for smooth analog response
   useEffect(() => {
     audioLevelIntervalRef.current = setInterval(() => {
-      if (audioLevel !== lastAudioLevelRef.current) {
-        lastAudioLevelRef.current = audioLevel;
-        webViewRef.current?.postMessage(JSON.stringify({ amplitude: audioLevel }));
-      }
-    }, 50);
+      webViewRef.current?.postMessage(JSON.stringify({ amplitude: audioLevel }));
+    }, 33);
     return () => {
       if (audioLevelIntervalRef.current) clearInterval(audioLevelIntervalRef.current);
     };

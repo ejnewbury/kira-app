@@ -1,41 +1,50 @@
 /**
- * useVoiceMode — Main voice interaction hook for Kira app.
+ * useVoiceMode — Voice interaction for Kira app.
  *
- * Dual-path VAD:
- * - PRIMARY: Silero V5 neural VAD via ExecuTorch (dev builds)
- * - FALLBACK: Adaptive metering VAD via expo-av (Expo Go)
+ * Pipeline: expo-audio-studio (16kHz PCM) → Silero VAD (speech detection)
+ *   → accumulate audio during speech → on silence → Whisper transcribe on-device
+ *   → onTranscription callback → TTS response
  *
- * Pipeline: VAD → Record → Transcribe (backend) → Send → TTS
+ * Fallback: metering VAD + backend transcription if native modules unavailable.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Platform } from "react-native";
 import { Audio } from "expo-av";
-import { initAudioMode, requestMicPermission, base64ToInt16Array, int16ToFloat32, concatenateInt16Arrays, encodeInt16ToWAV, arrayBufferToBase64 } from "./audio-helpers";
-import { loadSileroVAD, detectSpeech, resetState as resetSileroState, unloadSilero, isSileroAvailable } from "./silero-vad";
-
-// Piper TTS (Kira's voice) with system TTS fallback
+import { base64ToInt16Array, int16ToFloat32, initAudioMode, requestMicPermission } from "./audio-helpers";
+import { loadSileroVAD, detectSpeech, resetState as resetSileroState, unloadSilero } from "./silero-vad";
 import * as PiperTTS from "./piper-tts";
+
+let FileSystem: any = null;
+try { FileSystem = require("expo-file-system"); } catch {}
 
 let useAudioRecorder: any = null;
 try { useAudioRecorder = require("@siteed/expo-audio-studio").useAudioRecorder; } catch {}
+
+let SpeechToTextModule: any = null;
+let WHISPER_MODEL: any = null;
+try {
+  const et = require("react-native-executorch");
+  SpeechToTextModule = et.SpeechToTextModule;
+  // Whisper Tiny multilingual — Base EN has inference issues on this device
+  // TODO: test WHISPER_BASE once react-native-executorch fixes forward() compat
+  WHISPER_MODEL = et.WHISPER_TINY;
+} catch {}
 
 export type VoiceState = "idle" | "listening" | "recording" | "transcribing" | "thinking" | "speaking";
 type VADEngine = "silero" | "metering";
 
 interface UseVoiceModeOptions {
   onTranscription: (text: string) => void;
-  onResponse?: (text: string) => void;
-  autoSpeak?: boolean;
   backendUrl?: string;
 }
 
 interface UseVoiceModeReturn {
   state: VoiceState;
   vadEngine: VADEngine;
-  ttsEngine: "voxtral" | "elevenlabs" | "system" | "none";
+  ttsEngine: "piper" | "system" | "none";
   isActive: boolean;
-  audioLevel: number; // 0-1 normalized audio amplitude for visualization
+  audioLevel: number;
   start: () => Promise<void>;
   stop: () => void;
   speak: (text: string) => Promise<void>;
@@ -43,14 +52,19 @@ interface UseVoiceModeReturn {
 }
 
 // Silero VAD config
-const SILERO_SPEECH_THRESHOLD = 0.5;
-const SILERO_SILENCE_FRAMES = 25; // ~900ms at 36ms/frame
-const SILERO_MIN_SPEECH_FRAMES = 8; // ~288ms minimum speech
+const SPEECH_THRESHOLD = 0.6;   // Raised from 0.5 — reduces false triggers from system sounds
+const SILENCE_THRESHOLD = 0.35;
+const CONFIRM_FRAMES = 5;       // Raised from 3 — requires ~180ms of confirmed speech (vs 108ms)
+const SILENCE_TIMEOUT_MS = 1500;
+const MIN_SPEECH_MS = 600;      // Raised from 400ms — short pings/dings won't qualify
+const FRAME_SIZE = 576; // 576 samples @ 16kHz = 36ms per frame
 
 // Metering fallback config
-const SILENCE_DURATION_MS = 1500;
-const MIN_SPEECH_MS = 500;
+const METERING_SILENCE_MS = 1500;
+const METERING_MIN_SPEECH_MS = 500;
 const NOISE_FLOOR_INITIAL = -55;
+const NOISE_FLOOR_MAX = -60;
+const NOISE_FLOOR_MIN = -130;
 
 export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
   const { onTranscription, backendUrl } = options;
@@ -59,154 +73,227 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
   const [vadEngine, setVadEngine] = useState<VADEngine>("metering");
   const stateRef = useRef<VoiceState>("idle");
   const isActiveRef = useRef(false);
+  const onTranscriptionRef = useRef(onTranscription);
+  const audioLevelRef = useRef(0);
 
-  // Silero path refs
-  const sileroLoadedRef = useRef(false);
-  const audioBufferRef = useRef<Int16Array[]>([]);
-  const silencFrameCountRef = useRef(0);
-  const speechFrameCountRef = useRef(0);
-  const frameAccumulatorRef = useRef<Float32Array>(new Float32Array(0));
+  useEffect(() => { onTranscriptionRef.current = onTranscription; }, [onTranscription]);
 
-  // Metering path refs
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  // Whisper STT
+  const whisperRef = useRef<any>(null);
+  const whisperLoadingRef = useRef(false);
+
+  // Silero VAD state
+  const speechFramesRef = useRef(0);
+  const silenceFramesRef = useRef(0);
+  const isSpeechRef = useRef(false);
+  const speechStartRef = useRef(0);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const noiseFloorRef = useRef(NOISE_FLOOR_INITIAL);
-  const recentMeteringsRef = useRef<number[]>([]);
-  const speechStartRef = useRef<number>(0);
-  const meteringIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const audioLevelRef = useRef<number>(0);
+  const rawAudioRef = useRef<Float32Array[]>([]);
+  const frameAccRef = useRef<Float32Array>(new Float32Array(0));
 
-  // Audio studio for Silero path
+  // Audio studio (Silero path) — must call hook at top level
+  const audioStudio = useAudioRecorder ? useAudioRecorder() : null;
   const audioStudioRef = useRef<any>(null);
 
-  const setVoiceState = useCallback((newState: VoiceState) => {
-    stateRef.current = newState;
-    setState(newState);
+  // Metering fallback refs
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const meteringIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const noiseFloorRef = useRef(NOISE_FLOOR_INITIAL);
+  const recentMeteringsRef = useRef<number[]>([]);
+  const meteringSpeechStartRef = useRef(0);
+  const meteringSilenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const setVoiceState = useCallback((s: VoiceState) => {
+    stateRef.current = s;
+    setState(s);
   }, []);
 
-  useEffect(() => {
-    return () => { stop(); };
+  useEffect(() => { return () => { stop(); }; }, []);
+
+  // ═══════════════════════════════════════
+  // WHISPER LOCAL TRANSCRIPTION
+  // ═══════════════════════════════════════
+
+  const loadWhisper = useCallback(async (): Promise<boolean> => {
+    if (whisperRef.current) return true;
+    if (whisperLoadingRef.current) return false;
+    if (!SpeechToTextModule || !WHISPER_MODEL) {
+      console.log("[VoiceMode] Whisper not available (no SpeechToTextModule)");
+      return false;
+    }
+
+    whisperLoadingRef.current = true;
+    try {
+      const whisper = new SpeechToTextModule();
+      await whisper.load(WHISPER_MODEL);
+      whisperRef.current = whisper;
+      console.log("[VoiceMode] Whisper loaded");
+      return true;
+    } catch (e: any) {
+      console.warn("[VoiceMode] Whisper load failed:", e.message);
+      return false;
+    } finally {
+      whisperLoadingRef.current = false;
+    }
+  }, []);
+
+  const transcribeLocal = useCallback(async (frames: Float32Array[]): Promise<string | null> => {
+    if (!whisperRef.current || frames.length === 0) return null;
+
+    const totalSamples = frames.reduce((sum, f) => sum + f.length, 0);
+
+    // Concatenate all frames
+    const fullWaveform = new Float32Array(totalSamples);
+    let offset = 0;
+    for (const frame of frames) {
+      fullWaveform.set(frame, offset);
+      offset += frame.length;
+    }
+
+    const totalSeconds = totalSamples / 16000;
+    console.log(`[VoiceMode] Transcribing ${totalSeconds.toFixed(1)}s audio locally...`);
+
+    // Whisper Tiny handles up to ~28s well. For longer, chunk into segments.
+    const CHUNK_SAMPLES = 16000 * 28;
+
+    try {
+      if (totalSamples <= CHUNK_SAMPLES) {
+        const text = await whisperRef.current.transcribe(fullWaveform, { language: "en" });
+        return text?.trim() || null;
+      } else {
+        // Chunk transcription for long utterances
+        const parts: string[] = [];
+        for (let start = 0; start < totalSamples; start += CHUNK_SAMPLES) {
+          const end = Math.min(start + CHUNK_SAMPLES, totalSamples);
+          const chunk = fullWaveform.subarray(start, end);
+          const text = await whisperRef.current.transcribe(chunk, { language: "en" });
+          if (text?.trim()) parts.push(text.trim());
+        }
+        return parts.join(" ") || null;
+      }
+    } catch (e: any) {
+      console.warn("[VoiceMode] Local transcription failed:", e.message);
+      // Reload Whisper after failure — model may be in bad state
+      whisperRef.current = null;
+      loadWhisper().catch(() => {});
+      return null;
+    }
   }, []);
 
   // ═══════════════════════════════════════
   // SILERO VAD PATH (primary)
   // ═══════════════════════════════════════
 
-  const processFrames = useCallback(async (audioData: Int16Array) => {
-    // Accumulate into 576-sample frames for Silero
-    const float32 = int16ToFloat32(audioData);
-    const accumulated = new Float32Array(frameAccumulatorRef.current.length + float32.length);
-    accumulated.set(frameAccumulatorRef.current);
-    accumulated.set(float32, frameAccumulatorRef.current.length);
-    frameAccumulatorRef.current = accumulated;
+  const handleSpeechEnd = useCallback(async () => {
+    if (!isSpeechRef.current) return;
+    isSpeechRef.current = false;
+    speechFramesRef.current = 0;
+    silenceFramesRef.current = 0;
 
-    while (frameAccumulatorRef.current.length >= 576) {
-      const frame = frameAccumulatorRef.current.slice(0, 576);
-      frameAccumulatorRef.current = frameAccumulatorRef.current.slice(576);
+    const frames = rawAudioRef.current;
+    rawAudioRef.current = [];
+
+    setVoiceState("transcribing");
+
+    const text = await transcribeLocal(frames);
+    console.log("[VoiceMode] Whisper result:", JSON.stringify(text?.slice(0, 100)));
+    // Filter out Whisper hallucination tokens and scene descriptions
+    const cleaned = text
+      ?.replace(/\[.*?\]/g, "")          // [BLANK_AUDIO], [BELL], [MUSIC], [NOISE], etc.
+      ?.replace(/\(.*?\)/g, "")          // (blank audio), (bell ringing), etc.
+      ?.replace(/♪.*?♪/g, "")           // ♪ music ♪
+      ?.replace(/\*.*?\*/g, "")          // *sounds*
+      ?.trim();
+    if (cleaned && cleaned.length > 3) { // Require at least a few real characters
+      onTranscriptionRef.current(cleaned);
+    } else {
+      console.log("[VoiceMode] Whisper returned empty/blank — audio may be corrupted");
+    }
+
+    resetSileroState();
+    if (isActiveRef.current) setVoiceState("listening");
+  }, [transcribeLocal, setVoiceState]);
+
+  const processChunk = useCallback(async (pcm: Float32Array) => {
+    if (!isActiveRef.current) return;
+
+    // Compute RMS amplitude from raw PCM for smooth analog visualization
+    let sumSq = 0;
+    for (let i = 0; i < pcm.length; i++) sumSq += pcm[i] * pcm[i];
+    const rms = Math.sqrt(sumSq / pcm.length);
+    // Map RMS to 0-1 range with some headroom (typical speech RMS ~0.02-0.15)
+    const rawLevel = Math.min(1, rms * 10);
+    // Smooth it — fast attack, slow decay for natural feel
+    if (rawLevel > audioLevelRef.current) {
+      audioLevelRef.current = audioLevelRef.current * 0.5 + rawLevel * 0.5; // Fast attack
+    } else {
+      audioLevelRef.current = audioLevelRef.current * 0.85 + rawLevel * 0.15; // Slow decay
+    }
+
+    // Save raw audio while speech is active
+    if (isSpeechRef.current || speechFramesRef.current > 0) {
+      rawAudioRef.current.push(new Float32Array(pcm));
+    }
+
+    // Accumulate into frame buffer
+    const prev = frameAccRef.current;
+    const combined = new Float32Array(prev.length + pcm.length);
+    combined.set(prev);
+    combined.set(pcm, prev.length);
+    frameAccRef.current = combined;
+
+    // Process complete 576-sample frames
+    while (frameAccRef.current.length >= FRAME_SIZE) {
+      const frame = frameAccRef.current.slice(0, FRAME_SIZE);
+      frameAccRef.current = frameAccRef.current.slice(FRAME_SIZE);
 
       const prob = await detectSpeech(frame);
-      if (prob < 0) continue; // Inference failed or busy
+      if (prob < 0) continue;
 
-      if (prob >= SILERO_SPEECH_THRESHOLD) {
-        speechFrameCountRef.current++;
-        silencFrameCountRef.current = 0;
+      if (prob >= SPEECH_THRESHOLD) {
+        speechFramesRef.current++;
+        silenceFramesRef.current = 0;
 
-        if (stateRef.current === "listening") {
-          setVoiceState("recording");
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
         }
-      } else {
-        if (stateRef.current === "recording") {
-          silencFrameCountRef.current++;
 
-          if (silencFrameCountRef.current >= SILERO_SILENCE_FRAMES) {
-            if (speechFrameCountRef.current >= SILERO_MIN_SPEECH_FRAMES) {
-              handleSileroSpeechEnd();
-            } else {
-              // Too short — reset
-              speechFrameCountRef.current = 0;
-              silencFrameCountRef.current = 0;
-              setVoiceState("listening");
-            }
+        if (!isSpeechRef.current && speechFramesRef.current >= CONFIRM_FRAMES) {
+          isSpeechRef.current = true;
+          speechStartRef.current = Date.now();
+          setVoiceState("recording");
+          console.log("[VoiceMode] Speech detected");
+        }
+      } else if (prob <= SILENCE_THRESHOLD) {
+        silenceFramesRef.current++;
+        speechFramesRef.current = 0;
+
+        if (isSpeechRef.current && silenceFramesRef.current >= CONFIRM_FRAMES && !silenceTimerRef.current) {
+          const dur = Date.now() - speechStartRef.current;
+          if (dur >= MIN_SPEECH_MS) {
+            silenceTimerRef.current = setTimeout(() => {
+              silenceTimerRef.current = null;
+              handleSpeechEnd();
+            }, SILENCE_TIMEOUT_MS);
+          } else {
+            // Too short, reset
+            isSpeechRef.current = false;
+            speechFramesRef.current = 0;
+            silenceFramesRef.current = 0;
+            rawAudioRef.current = [];
+            setVoiceState("listening");
           }
         }
       }
     }
-  }, []);
-
-  const startSilero = useCallback(async () => {
-    if (!useAudioRecorder) {
-      console.warn("[VoiceMode] expo-audio-studio not available, falling back to metering");
-      return false;
-    }
-
-    try {
-      const sileroOk = await loadSileroVAD();
-      if (!sileroOk) {
-        console.warn("[VoiceMode] Silero not available, falling back to metering");
-        return false;
-      }
-
-      sileroLoadedRef.current = true;
-      setVadEngine("silero");
-      resetSileroState();
-      audioBufferRef.current = [];
-      speechFrameCountRef.current = 0;
-      silencFrameCountRef.current = 0;
-      frameAccumulatorRef.current = new Float32Array(0);
-
-      // Start audio stream via expo-audio-studio
-      // The audioStudio instance needs to be created in the component
-      // For now, we'll use it if passed in, otherwise fall back
-      console.log("[VoiceMode] Silero VAD active — neural speech detection");
-      return true;
-    } catch (e) {
-      console.warn("[VoiceMode] Silero init failed:", e);
-      return false;
-    }
-  }, []);
-
-  const handleSileroSpeechEnd = useCallback(async () => {
-    setVoiceState("transcribing");
-
-    // Build WAV from accumulated audio buffer
-    const allAudio = concatenateInt16Arrays(audioBufferRef.current);
-    audioBufferRef.current = [];
-    speechFrameCountRef.current = 0;
-    silencFrameCountRef.current = 0;
-
-    if (allAudio.length < 1600) { // Less than 100ms
-      setVoiceState("listening");
-      return;
-    }
-
-    try {
-      const wavBuffer = encodeInt16ToWAV(allAudio, 16000);
-      const base64 = arrayBufferToBase64(wavBuffer);
-
-      // Transcribe
-      const text = await transcribeBase64Audio(base64);
-      if (text?.trim()) {
-        onTranscription(text.trim());
-      }
-
-      if (isActiveRef.current) {
-        setVoiceState("listening");
-      }
-    } catch (error) {
-      console.error("[VoiceMode] Silero transcription failed:", error);
-      if (isActiveRef.current) setVoiceState("listening");
-    }
-  }, [onTranscription]);
+  }, [handleSpeechEnd, setVoiceState]);
 
   // ═══════════════════════════════════════
   // METERING VAD PATH (fallback)
   // ═══════════════════════════════════════
 
-  const NOISE_FLOOR_MAX = -60; // Never let floor rise above this
-  const NOISE_FLOOR_MIN = -130; // Never let floor drop below this — -160 means "no data yet"
-
   const updateNoiseFloor = useCallback((metering: number) => {
-    // During recording, only accept clearly-silent samples (below -90dB) for floor calibration
     if (stateRef.current === "recording" && metering > -90) return;
     recentMeteringsRef.current.push(metering);
     if (recentMeteringsRef.current.length > 50) recentMeteringsRef.current.shift();
@@ -215,8 +302,55 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
     noiseFloorRef.current = Math.max(Math.min(raw, NOISE_FLOOR_MAX), NOISE_FLOOR_MIN);
   }, []);
 
+  const handleMeteringSpeechEnd = useCallback(async () => {
+    if (!recordingRef.current) return;
+    setVoiceState("transcribing");
+
+    if (meteringIntervalRef.current) {
+      clearInterval(meteringIntervalRef.current);
+      meteringIntervalRef.current = null;
+    }
+
+    try {
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+
+      if (uri) {
+        // Try local Whisper first, fall back to backend
+        let text: string | null = null;
+        if (whisperRef.current) {
+          try {
+            // Read WAV file via expo-file-system (fetch doesn't work for local URIs on Android)
+            const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: "base64" });
+            const binaryStr = atob(base64Data);
+            const bytes = new Uint8Array(binaryStr.length);
+            for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+            // Skip WAV header (44 bytes), convert int16 PCM to float32
+            const int16 = new Int16Array(bytes.buffer, 44);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+            text = await whisperRef.current.transcribe(float32, { language: "en" });
+            text = text?.trim() || null;
+            if (text) console.log("[VoiceMode] Local Whisper transcribed:", text.slice(0, 60));
+          } catch (e: any) {
+            console.warn("[VoiceMode] Local Whisper failed, trying backend:", e.message);
+          }
+        }
+        if (!text) {
+          text = await transcribeFileAudio(uri);
+        }
+        if (text?.trim()) onTranscriptionRef.current(text.trim());
+      }
+      if (isActiveRef.current) { setVoiceState("listening"); startMetering(); }
+    } catch {
+      if (isActiveRef.current) { setVoiceState("listening"); startMetering(); }
+    }
+  }, []);
+
   const startMetering = useCallback(async () => {
     setVadEngine("metering");
+    console.log("[VoiceMode] Starting metering VAD fallback");
 
     const { recording } = await Audio.Recording.createAsync({
       ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
@@ -248,139 +382,36 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
 
         const threshold = noiseFloorRef.current + 12;
         const isSpeech = metering > threshold;
-
-        // Normalize metering (-160 to 0 dBFS) to 0-1 for visualization
         audioLevelRef.current = Math.max(0, Math.min(1, (metering + 160) / 120));
-
-        // Debug: log every 10th reading
-        if (Math.random() < 0.1) {
-          console.log(`[VAD] metering=${metering.toFixed(1)} floor=${noiseFloorRef.current.toFixed(1)} threshold=${threshold.toFixed(1)} speech=${isSpeech}`);
-        }
 
         if (isSpeech) {
           if (stateRef.current !== "recording") {
-            console.log("[VAD] Speech detected — transitioning to recording");
-            speechStartRef.current = Date.now();
+            meteringSpeechStartRef.current = Date.now();
             setVoiceState("recording");
+            console.log("[VoiceMode] Metering: speech detected");
           }
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = null;
+          if (meteringSilenceTimerRef.current) {
+            clearTimeout(meteringSilenceTimerRef.current);
+            meteringSilenceTimerRef.current = null;
           }
         } else if (stateRef.current === "recording") {
-          if (!silenceTimerRef.current) {
-            console.log("[VAD] Silence detected — starting end-of-speech timer");
-            silenceTimerRef.current = setTimeout(() => {
-              const dur = Date.now() - speechStartRef.current;
-              console.log(`[VAD] Speech ended, duration=${dur}ms (min=${MIN_SPEECH_MS}ms)`);
-              if (dur >= MIN_SPEECH_MS) {
+          if (!meteringSilenceTimerRef.current) {
+            meteringSilenceTimerRef.current = setTimeout(() => {
+              const dur = Date.now() - meteringSpeechStartRef.current;
+              if (dur >= METERING_MIN_SPEECH_MS) {
                 handleMeteringSpeechEnd();
               } else {
-                console.log("[VAD] Too short, ignoring");
                 setVoiceState("listening");
               }
-              silenceTimerRef.current = null;
-            }, SILENCE_DURATION_MS);
+              meteringSilenceTimerRef.current = null;
+            }, METERING_SILENCE_MS);
           }
         }
       } catch {}
     }, 100);
-  }, []);
+  }, [updateNoiseFloor, handleMeteringSpeechEnd, setVoiceState]);
 
-  const handleMeteringSpeechEnd = useCallback(async () => {
-    if (!recordingRef.current) return;
-    console.log("[VAD] handleMeteringSpeechEnd — stopping recording, transcribing...");
-    setVoiceState("transcribing");
-
-    if (meteringIntervalRef.current) {
-      clearInterval(meteringIntervalRef.current);
-      meteringIntervalRef.current = null;
-    }
-
-    try {
-      await recordingRef.current.stopAndUnloadAsync();
-      const uri = recordingRef.current.getURI();
-      recordingRef.current = null;
-
-      if (!uri) {
-        if (isActiveRef.current) { setVoiceState("listening"); start(); }
-        return;
-      }
-
-      const text = await transcribeFileAudio(uri);
-      if (text?.trim()) onTranscription(text.trim());
-
-      if (isActiveRef.current) { setVoiceState("listening"); start(); }
-    } catch {
-      if (isActiveRef.current) { setVoiceState("listening"); start(); }
-    }
-  }, [onTranscription]);
-
-  // ═══════════════════════════════════════
-  // PUBLIC API
-  // ═══════════════════════════════════════
-
-  const start = useCallback(async () => {
-    if (isActiveRef.current) return;
-
-    const hasMic = await requestMicPermission();
-    if (!hasMic) return;
-
-    await initAudioMode();
-    isActiveRef.current = true;
-    setVoiceState("listening");
-
-    // Try Silero first, fall back to metering
-    const sileroOk = await startSilero();
-    if (!sileroOk) {
-      try {
-        await startMetering();
-      } catch (error) {
-        console.error("[VoiceMode] Failed to start:", error);
-        isActiveRef.current = false;
-        setVoiceState("idle");
-      }
-    }
-  }, []);
-
-  const stop = useCallback(() => {
-    isActiveRef.current = false;
-    setVoiceState("idle");
-
-    // Clean up metering path
-    if (meteringIntervalRef.current) { clearInterval(meteringIntervalRef.current); meteringIntervalRef.current = null; }
-    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
-    if (recordingRef.current) { recordingRef.current.stopAndUnloadAsync().catch(() => {}); recordingRef.current = null; }
-
-    // Clean up Silero path
-    if (sileroLoadedRef.current) {
-      unloadSilero();
-      sileroLoadedRef.current = false;
-    }
-    audioBufferRef.current = [];
-
-    PiperTTS.stop();
-  }, []);
-
-  const speak = useCallback(async (text: string) => {
-    setVoiceState("speaking");
-    try {
-      await PiperTTS.speak(text);
-    } catch {
-      // Fallback handled inside PiperTTS
-    }
-    setVoiceState(isActiveRef.current ? "listening" : "idle");
-  }, []);
-
-  const stopSpeaking = useCallback(() => {
-    PiperTTS.stop();
-    if (stateRef.current === "speaking") setVoiceState(isActiveRef.current ? "listening" : "idle");
-  }, []);
-
-  // ═══════════════════════════════════════
-  // TRANSCRIPTION
-  // ═══════════════════════════════════════
-
+  // Backend transcription fallback (for metering path)
   async function transcribeFileAudio(uri: string): Promise<string | null> {
     try {
       const formData = new FormData();
@@ -392,18 +423,101 @@ export function useVoiceMode(options: UseVoiceModeOptions): UseVoiceModeReturn {
     } catch { return null; }
   }
 
-  async function transcribeBase64Audio(base64Wav: string): Promise<string | null> {
+  // ═══════════════════════════════════════
+  // PUBLIC API
+  // ═══════════════════════════════════════
+
+  const start = useCallback(async () => {
+    if (isActiveRef.current) return;
+
+    const hasMic = await requestMicPermission();
+    if (!hasMic) return;
+    await initAudioMode();
+
+    isActiveRef.current = true;
+    setVoiceState("listening");
+
+    // Try Silero + Whisper (fully on-device)
+    if (audioStudio) {
+      try {
+        const sileroOk = await loadSileroVAD();
+        const whisperOk = await loadWhisper();
+
+        if (sileroOk && whisperOk) {
+          setVadEngine("silero");
+          resetSileroState();
+          speechFramesRef.current = 0;
+          silenceFramesRef.current = 0;
+          isSpeechRef.current = false;
+          rawAudioRef.current = [];
+          frameAccRef.current = new Float32Array(0);
+
+          // Start the audio stream via expo-audio-studio
+          await audioStudio.startRecording({
+            sampleRate: 16000,
+            channels: 1,
+            encoding: "pcm_16bit",
+            interval: 100,
+            onAudioStream: async (event: any) => {
+              if (!isActiveRef.current) return;
+              const int16 = base64ToInt16Array(event.data as string);
+              const float32 = int16ToFloat32(int16);
+              processChunk(float32);
+            },
+          });
+
+          console.log("[VoiceMode] Silero VAD + Whisper STT — fully on-device");
+          return;
+        }
+      } catch (e: any) {
+        console.warn("[VoiceMode] Native pipeline failed:", e.message);
+      }
+    }
+
+    // Fallback to metering VAD + backend transcription
     try {
-      const url = backendUrl || "https://kira-backend-six.vercel.app";
-      const res = await fetch(`${url}/api/kira/transcribe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audio: base64Wav, format: "wav" }),
-      });
-      if (!res.ok) return null;
-      return (await res.json()).text || null;
-    } catch { return null; }
-  }
+      await startMetering();
+      console.log("[VoiceMode] Metering VAD + backend transcription (fallback)");
+    } catch (e: any) {
+      console.error("[VoiceMode] Failed to start any voice mode:", e.message);
+      isActiveRef.current = false;
+      setVoiceState("idle");
+    }
+  }, [loadWhisper, processChunk, startMetering, setVoiceState]);
+
+  const stop = useCallback(() => {
+    isActiveRef.current = false;
+    setVoiceState("idle");
+
+    // Clean up Silero path
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    if (audioStudio) {
+      try { audioStudio.stopRecording(); } catch {}
+    }
+    unloadSilero();
+    rawAudioRef.current = [];
+    frameAccRef.current = new Float32Array(0);
+
+    // Clean up metering path
+    if (meteringIntervalRef.current) { clearInterval(meteringIntervalRef.current); meteringIntervalRef.current = null; }
+    if (meteringSilenceTimerRef.current) { clearTimeout(meteringSilenceTimerRef.current); meteringSilenceTimerRef.current = null; }
+    if (recordingRef.current) { recordingRef.current.stopAndUnloadAsync().catch(() => {}); recordingRef.current = null; }
+
+    PiperTTS.stop();
+  }, [setVoiceState]);
+
+  const speak = useCallback(async (text: string) => {
+    setVoiceState("speaking");
+    try {
+      await PiperTTS.speak(text);
+    } catch {}
+    setVoiceState(isActiveRef.current ? "listening" : "idle");
+  }, [setVoiceState]);
+
+  const stopSpeaking = useCallback(() => {
+    PiperTTS.stop();
+    if (stateRef.current === "speaking") setVoiceState(isActiveRef.current ? "listening" : "idle");
+  }, [setVoiceState]);
 
   return {
     state,

@@ -74,8 +74,11 @@ export async function registerForPushNotifications(): Promise<string | null> {
       );
 
     return token;
-  } catch (error) {
-    console.error("[Notifications] Failed to get push token:", error);
+  } catch (error: any) {
+    // Only log once, not on every retry — Firebase not configured yet
+    if (!error?.message?.includes("FirebaseApp")) {
+      console.warn("[Notifications] Push token error:", error?.message);
+    }
     return null;
   }
 }
