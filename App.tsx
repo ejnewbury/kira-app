@@ -17,6 +17,7 @@ import { useVoiceMode, type VoiceState } from "./lib/useVoiceMode";
 import { pushConversationSummary, pullDesktopContext } from "./lib/context-sync";
 import { useRealtimeMessages } from "./lib/useRealtimeMessages";
 import KiraOrb from "./lib/KiraOrb";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
 import * as PiperTTS from "./lib/piper-tts";
 import { registerForPushNotifications } from "./lib/notifications";
@@ -234,11 +235,14 @@ function ChatScreen() {
   const toggleHandsFree = useCallback(() => {
     if (isHandsFree) {
       voiceMode.stop();
+      deactivateKeepAwake();
       setIsHandsFree(false);
     } else {
       // Stop any playing audio and mute notifications before entering voice mode
       voiceMode.stopSpeaking();
       PiperTTS.stop();
+      // Keep screen alive during voice mode so TTS can play
+      activateKeepAwakeAsync().catch(() => {});
       // Mute notification sounds to prevent internal audio loopback triggering VAD
       try { Audio?.setAudioModeAsync({ staysActiveInBackground: true, shouldDuckAndroid: true }); } catch {}
       voiceMode.start();
