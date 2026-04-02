@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "224635157979",
+    "project_id": "kira-2402c",
+    "storage_bucket": "kira-2402c.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:224635157979:android:0260dd6cd7ad57b8827bfe",
+        "android_client_info": {
+          "package_name": "com.vallaryn.kira"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDikM2pKUvWyU9aS70F526w9pjyM69WTjs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
