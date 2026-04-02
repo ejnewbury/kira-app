@@ -21,6 +21,7 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
 import * as PiperTTS from "./lib/piper-tts";
 import { registerForPushNotifications } from "./lib/notifications";
+import ChessScreen from "./lib/ChessScreen";
 
 // Lazy imports — these need native modules, unavailable in Expo Go
 let Audio: any = null;
@@ -478,9 +479,39 @@ function ChatScreen() {
 }
 
 export default function App() {
+  const [screen, setScreen] = useState<"chat" | "chess">("chat");
+
   return (
     <SafeAreaProvider>
-      <ChatScreen />
+      {screen === "chess" ? (
+        <ChessScreen onClose={() => setScreen("chat")} />
+      ) : (
+        <View style={{ flex: 1 }}>
+          <ChatScreen />
+          {/* Chess button — floating */}
+          <Pressable
+            style={{
+              position: "absolute",
+              bottom: 100,
+              right: 20,
+              backgroundColor: "#2A9D8F",
+              width: 50,
+              height: 50,
+              borderRadius: 25,
+              justifyContent: "center",
+              alignItems: "center",
+              elevation: 5,
+              shadowColor: "#000",
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.3,
+              shadowRadius: 4,
+            }}
+            onPress={() => setScreen("chess")}
+          >
+            <Text style={{ fontSize: 24 }}>♟</Text>
+          </Pressable>
+        </View>
+      )}
     </SafeAreaProvider>
   );
 }

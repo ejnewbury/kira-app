@@ -24,13 +24,22 @@
       "permissions": [
         "android.permission.RECORD_AUDIO"
       ],
-      "package": "com.vallaryn.kira"
+      "package": "com.vallaryn.kira",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/android-icon-monochrome.png",
+          "color": "#2A9D8F",
+          "defaultChannel": "kira"
+        }
+      ],
       [
         "expo-build-properties",
         {

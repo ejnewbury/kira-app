@@ -12,6 +12,7 @@
     "@siteed/expo-audio-studio": "^3.0.2",
     "@supabase/supabase-js": "^2.99.3",
     "babel-preset-expo": "^55.0.12",
+    "chess.js": "^1.4.0",
     "expo": "~55.0.8",
     "expo-av": "^16.0.8",
     "expo-build-properties": "~55.0.10",
