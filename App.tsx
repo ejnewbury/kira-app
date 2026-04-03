@@ -84,6 +84,7 @@ const TEXT_PRIMARY = "#F5F5F5";
 const TEXT_SECONDARY = "#999";
 const USER_BUBBLE = "#2A2A3A";
 const KIRA_BUBBLE = "#1E2A1E";
+const QWEN_BUBBLE = "#1A1E2E";
 // Kira identity color — deep teal
 const KIRA_TEAL = "#2A9D8F";
 
@@ -338,21 +339,27 @@ function ChatScreen() {
 
   const renderMessage = useCallback(({ item }: { item: Message }) => {
     const isUser = item.role === "user";
+    const isQwen = item.source === "qwenboy";
     const isPending = item.status === "pending" || item.status === "processing";
 
+    const bubbleStyle = isUser
+      ? styles.userBubble
+      : isQwen
+      ? styles.qwenBubble
+      : styles.kiraBubble;
+
+    const senderName = isUser
+      ? "Eric"
+      : isQwen
+      ? "QwenBoy6000"
+      : item.source === "terminal"
+      ? "Kira (Terminal)"
+      : "Kira";
+
     return (
-      <View
-        style={[
-          styles.messageBubble,
-          isUser ? styles.userBubble : styles.kiraBubble,
-        ]}
-      >
-        <Text style={styles.senderLabel}>
-          {isUser
-            ? "Eric"
-            : item.source === "terminal"
-            ? "Kira (Terminal)"
-            : "Kira (Phone)"}
+      <View style={[styles.messageBubble, bubbleStyle]}>
+        <Text style={[styles.senderLabel, isQwen && styles.qwenLabel]}>
+          {senderName}
         </Text>
         <Text style={[styles.messageText, isPending && styles.pendingText]}>
           {item.content}
@@ -703,6 +710,14 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     backgroundColor: KIRA_BUBBLE,
     borderBottomLeftRadius: 4,
+  },
+  qwenBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: QWEN_BUBBLE,
+    borderBottomLeftRadius: 4,
+  },
+  qwenLabel: {
+    color: "#5B8DEF",
   },
   senderLabel: {
     fontSize: 11,
