@@ -6,7 +6,7 @@
 import React, { useCallback, useState } from "react";
 import { View, Text, StyleSheet, SafeAreaView, Pressable } from "react-native";
 import ChessBoard from "./ChessBoard";
-import { setChessMoveResolver, getLastChessMessage } from "../App";
+import { setChessMoveResolver, setLastChessCommandId, getLastChessMessage } from "../App";
 
 const BACKEND_URL = "https://kira-backend-six.vercel.app";
 const API_KEY = "ee35a1f1ea15d2ca456089e562a296382511246a28250de47b82520edae92c14";
@@ -26,15 +26,15 @@ export default function ChessScreen({ onClose }: { onClose?: () => void }) {
         body: JSON.stringify({ fen, history, lastMove }),
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.move) {
-          if (data.message) setKiraMessage(data.message);
-          return data.move;
-        }
+      const data = response.ok ? await response.json() : null;
+      if (data?.move) {
+        if (data.message) setKiraMessage(data.message);
+        return data.move;
       }
 
       // Kira hasn't responded within the long-poll — wait for Realtime via App-level listener
+      // Track the command ID so AppState recovery can find it
+      if (data?.commandId) setLastChessCommandId(data.commandId);
       setKiraMessage("Kira is thinking...");
       return new Promise<string | null>((resolve) => {
         // Register with app-level resolver

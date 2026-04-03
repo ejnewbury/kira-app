@@ -21,6 +21,7 @@ import {
 } from "react-native";
 // @ts-ignore — chess.js types
 import { Chess } from "chess.js";
+import { consumePendingKiraMove } from "../App";
 
 const BOARD_SIZE = Math.min(Dimensions.get("window").width - 32, 400);
 const SQUARE_SIZE = BOARD_SIZE / 8;
@@ -89,6 +90,21 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
           } catch {}
         }
       }
+      // Check if a Kira move arrived while we were unmounted
+      const pendingMove = consumePendingKiraMove();
+      if (pendingMove && game.turn() === "b") {
+        try {
+          let result = game.move(pendingMove);
+          if (!result) {
+            result = game.move({ from: pendingMove.substring(0, 2), to: pendingMove.substring(2, 4), promotion: pendingMove[4] || undefined });
+          }
+          if (result) {
+            setLastMove({ from: result.from, to: result.to });
+            saveGame(game);
+          }
+        } catch {}
+      }
+
       setBoard([...game.board()]);
       setMoveHistory([...game.history()]);
       if (game.isGameOver()) {

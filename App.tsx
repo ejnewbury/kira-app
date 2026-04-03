@@ -10,6 +10,7 @@ import {
   Platform,
   ActivityIndicator,
   StatusBar,
+  AppState,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
@@ -27,11 +28,47 @@ import { supabase } from "./lib/supabase";
 // App-level chess move listener — survives screen switches
 let pendingChessMoveResolve: ((move: string | null) => void) | null = null;
 let lastChessMessage = "";
+let lastChessCommandId: string | null = null;
+// Stores Kira's move if it arrives while chess screen is unmounted
+let pendingKiraMove: string | null = null;
 
 export function setChessMoveResolver(resolve: ((move: string | null) => void) | null) {
   pendingChessMoveResolve = resolve;
 }
+export function setLastChessCommandId(id: string | null) { lastChessCommandId = id; }
 export function getLastChessMessage() { return lastChessMessage; }
+export function consumePendingKiraMove(): string | null {
+  const move = pendingKiraMove;
+  pendingKiraMove = null;
+  return move;
+}
+
+function deliverChessMove(move: string, message?: string) {
+  lastChessMessage = message || "Your turn.";
+  if (pendingChessMoveResolve) {
+    pendingChessMoveResolve(move);
+    pendingChessMoveResolve = null;
+  } else {
+    // No resolver — chess screen might be unmounted. Stash for later.
+    pendingKiraMove = move;
+  }
+  lastChessCommandId = null;
+}
+
+// Recovery: check if a pending chess command was completed while app was backgrounded
+async function recoverMissedChessMove() {
+  if (!lastChessCommandId) return;
+  try {
+    const { data } = await supabase
+      .from("device_commands")
+      .select("*")
+      .eq("id", lastChessCommandId)
+      .single();
+    if (data?.status === "complete" && data?.result?.move) {
+      deliverChessMove(data.result.move, data.result.message);
+    }
+  } catch {}
+}
 
 // Lazy imports — these need native modules, unavailable in Expo Go
 let Audio: any = null;
@@ -491,6 +528,14 @@ function ChatScreen() {
 export default function App() {
   const [screen, setScreen] = useState<"chat" | "chess">("chat");
 
+  // Recover missed chess moves when app comes back to foreground
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") recoverMissedChessMove();
+    });
+    return () => sub.remove();
+  }, []);
+
   // App-level Supabase Realtime listener for chess moves — never unmounts
   useEffect(() => {
     const channel = supabase
@@ -509,11 +554,7 @@ export default function App() {
             updated.status === "complete" &&
             updated.result?.move
           ) {
-            lastChessMessage = updated.result.message || "Your turn.";
-            if (pendingChessMoveResolve) {
-              pendingChessMoveResolve(updated.result.move);
-              pendingChessMoveResolve = null;
-            }
+            deliverChessMove(updated.result.move, updated.result.message);
           }
         }
       )
