@@ -9,6 +9,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from "react";
+import * as SecureStore from "expo-secure-store";
 import {
   View,
   Text,
@@ -36,26 +37,73 @@ const SELECTED_COLOR = "rgba(255, 255, 0, 0.4)";
 const LEGAL_MOVE_COLOR = "rgba(0, 200, 0, 0.3)";
 const LAST_MOVE_COLOR = "rgba(100, 150, 255, 0.3)";
 
+// Module-level game instance — survives screen switches
+let persistentGame: InstanceType<typeof Chess> | null = null;
+const CHESS_STORAGE_KEY = "kira_chess_fen";
+
+function getGame(): InstanceType<typeof Chess> {
+  if (!persistentGame) persistentGame = new Chess();
+  return persistentGame;
+}
+
+async function saveGame(game: any) {
+  try {
+    await SecureStore.setItemAsync(CHESS_STORAGE_KEY, game.fen());
+  } catch {}
+}
+
+async function loadSavedGame(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(CHESS_STORAGE_KEY);
+  } catch { return null; }
+}
+
 interface ChessBoardProps {
   onGameOver?: (result: string) => void;
   onKiraMoveRequest?: (fen: string, moveHistory: string[]) => Promise<string | null>;
 }
 
 export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoardProps) {
-  const [game] = useState(() => new Chess());
-  const [board, setBoard] = useState(game.board());
+  const [game] = useState(() => getGame());
+  const [board, setBoard] = useState(() => game.board());
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [legalMoves, setLegalMoves] = useState<string[]>([]);
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
-  const [moveHistory, setMoveHistory] = useState<string[]>([]);
+  const [moveHistory, setMoveHistory] = useState<string[]>(() => game.history());
   const [isKiraThinking, setIsKiraThinking] = useState(false);
-  const [status, setStatus] = useState("Your move (White)");
-  const [gameOver, setGameOver] = useState(false);
+  const [status, setStatus] = useState(() => {
+    if (game.isGameOver()) return "Game over";
+    return game.turn() === "w" ? "Your move (White)" : "Kira thinking...";
+  });
+  const [gameOver, setGameOver] = useState(() => game.isGameOver());
+
+  // Restore board state on mount — from memory or AsyncStorage
+  useEffect(() => {
+    (async () => {
+      // If persistent game is empty (app was killed), try loading from storage
+      if (game.history().length === 0) {
+        const savedFen = await loadSavedGame();
+        if (savedFen && savedFen !== "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") {
+          try {
+            game.load(savedFen);
+          } catch {}
+        }
+      }
+      setBoard([...game.board()]);
+      setMoveHistory([...game.history()]);
+      if (game.isGameOver()) {
+        setGameOver(true);
+      } else {
+        setStatus(game.turn() === "w" ? "Your move (White)" : "Kira thinking...");
+      }
+    })();
+  }, []);
 
   const updateBoard = useCallback(() => {
     setBoard([...game.board()]);
     const history = game.history();
     setMoveHistory([...history]);
+    saveGame(game); // Persist after every move
 
     if (game.isCheckmate()) {
       const winner = game.turn() === "w" ? "Kira" : "Eric";
@@ -165,7 +213,9 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
   );
 
   const newGame = useCallback(() => {
+    persistentGame = new Chess();
     game.reset();
+    SecureStore.deleteItemAsync(CHESS_STORAGE_KEY).catch(() => {});
     setSelectedSquare(null);
     setLegalMoves([]);
     setLastMove(null);

@@ -22,6 +22,16 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import * as PiperTTS from "./lib/piper-tts";
 import { registerForPushNotifications } from "./lib/notifications";
 import ChessScreen from "./lib/ChessScreen";
+import { supabase } from "./lib/supabase";
+
+// App-level chess move listener — survives screen switches
+let pendingChessMoveResolve: ((move: string | null) => void) | null = null;
+let lastChessMessage = "";
+
+export function setChessMoveResolver(resolve: ((move: string | null) => void) | null) {
+  pendingChessMoveResolve = resolve;
+}
+export function getLastChessMessage() { return lastChessMessage; }
 
 // Lazy imports — these need native modules, unavailable in Expo Go
 let Audio: any = null;
@@ -481,6 +491,37 @@ function ChatScreen() {
 export default function App() {
   const [screen, setScreen] = useState<"chat" | "chess">("chat");
 
+  // App-level Supabase Realtime listener for chess moves — never unmounts
+  useEffect(() => {
+    const channel = supabase
+      .channel("chess-app-level")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "device_commands",
+        },
+        (payload: any) => {
+          const updated = payload.new;
+          if (
+            updated.command_type === "chess_move_request" &&
+            updated.status === "complete" &&
+            updated.result?.move
+          ) {
+            lastChessMessage = updated.result.message || "Your turn.";
+            if (pendingChessMoveResolve) {
+              pendingChessMoveResolve(updated.result.move);
+              pendingChessMoveResolve = null;
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
   return (
     <SafeAreaProvider>
       {screen === "chess" ? (
@@ -488,19 +529,20 @@ export default function App() {
       ) : (
         <View style={{ flex: 1 }}>
           <ChatScreen />
-          {/* Chess button — floating */}
+          {/* Chess button — floating, always on top */}
           <Pressable
             style={{
               position: "absolute",
-              bottom: 100,
-              right: 20,
+              top: 50,
+              right: 16,
               backgroundColor: "#2A9D8F",
-              width: 50,
-              height: 50,
-              borderRadius: 25,
+              width: 44,
+              height: 44,
+              borderRadius: 22,
               justifyContent: "center",
               alignItems: "center",
-              elevation: 5,
+              elevation: 10,
+              zIndex: 999,
               shadowColor: "#000",
               shadowOffset: { width: 0, height: 2 },
               shadowOpacity: 0.3,
@@ -508,7 +550,7 @@ export default function App() {
             }}
             onPress={() => setScreen("chess")}
           >
-            <Text style={{ fontSize: 24 }}>♟</Text>
+            <Text style={{ fontSize: 20 }}>♟</Text>
           </Pressable>
         </View>
       )}
