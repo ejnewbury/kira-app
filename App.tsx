@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { checkForAppUpdate, CURRENT_VERSION } from "./lib/app-updater";
 import {
   View,
   Text,
@@ -11,6 +12,7 @@ import {
   ActivityIndicator,
   StatusBar,
   AppState,
+  Image,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
@@ -21,9 +23,11 @@ import KiraOrb from "./lib/KiraOrb";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
 import * as PiperTTS from "./lib/piper-tts";
+import { audioQueue, type Speaker } from "./lib/audio-queue";
 import { registerForPushNotifications } from "./lib/notifications";
 import ChessScreen from "./lib/ChessScreen";
 import { supabase } from "./lib/supabase";
+import * as ImagePicker from "expo-image-picker";
 
 // App-level chess move listener — survives screen switches
 let pendingChessMoveResolve: ((move: string | null) => void) | null = null;
@@ -85,6 +89,7 @@ const TEXT_SECONDARY = "#999";
 const USER_BUBBLE = "#2A2A3A";
 const KIRA_BUBBLE = "#1E2A1E";
 const QWEN_BUBBLE = "#1A1E2E";
+const RIFF_BUBBLE = "#2E2A1A";
 // Kira identity color — deep teal
 const KIRA_TEAL = "#2A9D8F";
 
@@ -143,23 +148,26 @@ function ChatScreen() {
 
   const handleSend = useCallback(async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    const image = pendingImage;
+    if ((!text && !image) || sending) return;
 
     setSending(true);
     setInput("");
+    setPendingImage(null);
 
-    // Optimistically add user message
+    // Optimistically add user message — match what gets sent
+    const displayText = image ? `📷 ${text || "What's in this image?"}` : text;
     const tempMsg: Message = {
       id: `temp-${Date.now()}`,
       role: "user",
-      content: text,
+      content: displayText,
       status: "pending",
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, tempMsg]);
 
     try {
-      const result = await sendMessage(text, conversationId || undefined);
+      const result = await sendMessage(text || "What's in this image?", conversationId || undefined, image || undefined);
       setConversationId(result.conversationId);
       // Fetch messages immediately, then poll for assistant response
       const real = await getMessages(result.conversationId);
@@ -175,7 +183,7 @@ function ChatScreen() {
       ]);
       setSending(false);
     }
-  }, [input, sending, conversationId, pollForResponse]);
+  }, [input, sending, conversationId, pendingImage, pollForResponse]);
 
   const startNewConversation = useCallback(() => {
     // Push summary of current conversation before starting new one
@@ -221,10 +229,50 @@ function ChatScreen() {
     }
   }, []);
 
+  // --- OTA Update Check (self-hosted via Supabase) ---
+  useEffect(() => { checkForAppUpdate().catch(() => {}); }, []);
+
   // --- Voice Mode ---
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [isHandsFree, setIsHandsFree] = useState(false);
   const prevMessageCountRef = useRef(0);
+  const [activeSpeaker, setActiveSpeaker] = useState<Speaker>(null);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | undefined>();
+
+  // Subscribe to audio queue speaker changes
+  useEffect(() => {
+    const unsub = audioQueue.onSpeakerChange((speaker, messageId) => {
+      setActiveSpeaker(speaker);
+      setSpeakingMessageId(messageId);
+    });
+    return unsub;
+  }, []);
+
+  // --- Image Picker ---
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
+
+  const pickImage = useCallback(async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      quality: 0.7,
+      base64: true,
+    });
+    if (!result.canceled && result.assets?.length && result.assets[0]?.base64) {
+      setPendingImage(result.assets[0].base64);
+    }
+  }, []);
+
+  const takePhoto = useCallback(async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== "granted") return;
+    const result = await ImagePicker.launchCameraAsync({
+      quality: 0.7,
+      base64: true,
+    });
+    if (!result.canceled && result.assets?.length && result.assets[0]?.base64) {
+      setPendingImage(result.assets[0].base64);
+    }
+  }, []);
 
   // Hands-free voice mode with adaptive VAD
   const voiceMode = useVoiceMode({
@@ -270,26 +318,28 @@ function ChatScreen() {
     // During hands-free, still speak NEW assistant responses — that's the whole point
     if (messages.length > prevMessageCountRef.current) {
       const newMsgs = messages.slice(prevMessageCountRef.current);
-      const lastAssistant = [...newMsgs].reverse().find(
-        (m) => m.role === "assistant" && m.status === "complete"
-      );
-      if (lastAssistant) {
-        voiceMode.speak(lastAssistant.content);
+      // Queue all new assistant messages — audio queue handles serialization
+      for (const msg of newMsgs) {
+        if (msg.role === "assistant" && msg.status === "complete") {
+          const speaker: Speaker = msg.source === "qwenboy" ? "qwenboy" : msg.source === "riffbot" ? "riffbot" : "kira";
+          audioQueue.enqueue(msg.content, speaker, msg.id);
+        }
       }
     }
     prevMessageCountRef.current = messages.length;
   }, [messages.length, ttsEnabled, isHandsFree]);
 
   // Toggle hands-free voice mode
-  const toggleHandsFree = useCallback(() => {
+  const toggleHandsFree = useCallback(async () => {
     if (isHandsFree) {
       voiceMode.stop();
+      await audioQueue.interrupt();
       deactivateKeepAwake();
       setIsHandsFree(false);
     } else {
       // Stop any playing audio and mute notifications before entering voice mode
-      voiceMode.stopSpeaking();
-      PiperTTS.stop();
+      await audioQueue.interrupt();
+      await voiceMode.stopSpeaking();
       // Keep screen alive during voice mode so TTS can play
       activateKeepAwakeAsync().catch(() => {});
       // Mute notification sounds to prevent internal audio loopback triggering VAD
@@ -340,33 +390,82 @@ function ChatScreen() {
   const renderMessage = useCallback(({ item }: { item: Message }) => {
     const isUser = item.role === "user";
     const isQwen = item.source === "qwenboy";
+    const isRiff = item.source === "riffbot";
     const isPending = item.status === "pending" || item.status === "processing";
 
     const bubbleStyle = isUser
       ? styles.userBubble
+      : isRiff
+      ? styles.riffBubble
       : isQwen
       ? styles.qwenBubble
       : styles.kiraBubble;
 
     const senderName = isUser
       ? "Eric"
+      : isRiff
+      ? "RiffBot 🎭"
       : isQwen
       ? "QwenBoy6000"
       : item.source === "terminal"
       ? "Kira (Terminal)"
       : "Kira";
 
+    const isSpeaking = speakingMessageId === item.id && activeSpeaker !== null;
+
+    const canSpeak = !isUser && !isPending && ttsEnabled;
+
     return (
-      <View style={[styles.messageBubble, bubbleStyle]}>
-        <Text style={[styles.senderLabel, isQwen && styles.qwenLabel]}>
-          {senderName}
-        </Text>
-        <Text style={[styles.messageText, isPending && styles.pendingText]}>
-          {item.content}
+      <View style={[styles.messageBubble, bubbleStyle, isSpeaking && styles.speakingBubble]}>
+        <View style={styles.senderRow}>
+          <Text style={[styles.senderLabel, isQwen && styles.qwenLabel, isRiff && styles.riffLabel]}>
+            {senderName}
+          </Text>
+          {isSpeaking && (
+            <View style={styles.speakingIndicator}>
+              <View style={[styles.speakingDot, styles.speakingDot1]} />
+              <View style={[styles.speakingDot, styles.speakingDot2]} />
+              <View style={[styles.speakingDot, styles.speakingDot3]} />
+            </View>
+          )}
+          {canSpeak && !isSpeaking && (
+            <Pressable
+              onPress={() => {
+                const speaker: Speaker = isQwen ? "qwenboy" : "kira";
+                audioQueue.enqueue(item.content, speaker, item.id);
+              }}
+              hitSlop={8}
+            >
+              <Text style={styles.speakerIcon}>🔊</Text>
+            </Pressable>
+          )}
+        </View>
+        {(() => {
+          const imageMatch = item.content.startsWith("[IMAGE:") ? item.content.match(/^\[IMAGE:([\w/.%-]+)\]/) : null;
+          const textContent = imageMatch ? item.content.slice(imageMatch[0].length).replace(/^\n/, "").trim() : item.content;
+          return (
+            <>
+              {imageMatch && (
+                <Image
+                  source={{ uri: `https://odxjaqwlzjxowfnajygb.supabase.co/storage/v1/object/public/kira-images/${imageMatch[1]}` }}
+                  style={styles.chatImage}
+                  resizeMode="cover"
+                />
+              )}
+              {textContent ? (
+                <Text style={[styles.messageText, isPending && styles.pendingText]}>
+                  {textContent}
+                </Text>
+              ) : null}
+            </>
+          );
+        })()}
+        <Text style={styles.timestamp}>
+          {new Date(item.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
         </Text>
       </View>
     );
-  }, []);
+  }, [activeSpeaker, speakingMessageId, ttsEnabled]);
 
   // Show "thinking" only if the LAST message is a user message that hasn't been answered.
   // Also check: if any assistant message exists AFTER the last user message, we're not waiting.
@@ -421,6 +520,9 @@ function ChatScreen() {
           <View style={styles.headerLeft}>
             <View style={styles.headerDot} />
             <Text style={styles.headerTitle}>Kira</Text>
+            <Pressable onPress={() => checkForAppUpdate(false).catch(() => {})} hitSlop={12}>
+              <Text style={styles.versionLabel}>{CURRENT_VERSION.replace("v1.0.", "")}</Text>
+            </Pressable>
           </View>
           <View style={styles.headerButtons}>
             <Pressable onPress={syncMessages} style={styles.syncButton}>
@@ -495,11 +597,22 @@ function ChatScreen() {
           </View>
         </Pressable>
 
+        {/* Image picker */}
+        <Pressable onPress={pickImage} onLongPress={takePhoto} style={styles.imagePickerButton}>
+          <Text style={styles.imagePickerText}>{pendingImage ? "📷✓" : "📷"}</Text>
+        </Pressable>
+
+        {pendingImage && (
+          <Pressable onPress={() => setPendingImage(null)} style={styles.imageClearButton}>
+            <Text style={styles.imageClearText}>✕</Text>
+          </Pressable>
+        )}
+
         <TextInput
           style={styles.input}
           value={input}
           onChangeText={setInput}
-          placeholder={isRecording ? "Listening..." : "Message Kira..."}
+          placeholder={pendingImage ? "Add a message to your image..." : isRecording ? "Listening..." : "Message Kira..."}
           placeholderTextColor={isRecording ? ACCENT : TEXT_SECONDARY}
           multiline
           maxLength={5000}
@@ -509,8 +622,8 @@ function ChatScreen() {
           editable={!isRecording}
         />
 
-        {/* Mic button (no text) or Send button (has text) */}
-        {input.trim() ? (
+        {/* Mic button (no text/image) or Send button (has text or image) */}
+        {input.trim() || pendingImage ? (
           <Pressable
             onPress={handleSend}
             disabled={sending}
@@ -520,11 +633,11 @@ function ChatScreen() {
           </Pressable>
         ) : (
           <Pressable
-            onPressIn={startRecording}
-            onPressOut={stopRecordingAndSend}
-            style={[styles.sendButton, isRecording && styles.recordingButton]}
+            onPress={handleSend}
+            disabled={sending}
+            style={[styles.sendButton, sending && styles.sendButtonDisabled]}
           >
-            <Text style={styles.sendButtonText}>{isRecording ? "●" : "🎤"}</Text>
+            <Text style={styles.sendButtonText}>↑</Text>
           </Pressable>
         )}
       </View>)}
@@ -636,6 +749,12 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: TEXT_PRIMARY,
   },
+  versionLabel: {
+    fontSize: 10,
+    color: TEXT_SECONDARY,
+    marginLeft: 6,
+    opacity: 0.5,
+  },
   headerSubtitle: {
     fontSize: 12,
     color: TEXT_SECONDARY,
@@ -719,18 +838,75 @@ const styles = StyleSheet.create({
   qwenLabel: {
     color: "#5B8DEF",
   },
+  riffBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: RIFF_BUBBLE,
+    borderBottomLeftRadius: 4,
+  },
+  riffLabel: {
+    color: "#E8B830",
+  },
+  speakingBubble: {
+    borderWidth: 1,
+    borderColor: ACCENT,
+  },
+  senderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 4,
+  },
+  speakingIndicator: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+  },
+  speakingDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: ACCENT,
+    opacity: 0.6,
+  },
+  speakingDot1: {
+    opacity: 1.0,
+  },
+  speakingDot2: {
+    opacity: 0.7,
+  },
+  speakingDot3: {
+    opacity: 0.4,
+  },
+  speakerIcon: {
+    fontSize: 14,
+    opacity: 0.5,
+    marginLeft: 4,
+  },
   senderLabel: {
     fontSize: 11,
     fontWeight: "600",
     color: ACCENT,
-    marginBottom: 4,
+    marginBottom: 0,
     textTransform: "uppercase",
     letterSpacing: 0.5,
+  },
+  chatImage: {
+    width: 220,
+    height: 220,
+    borderRadius: 8,
+    marginBottom: 6,
   },
   messageText: {
     fontSize: 16,
     color: TEXT_PRIMARY,
     lineHeight: 22,
+  },
+  timestamp: {
+    fontSize: 10,
+    color: TEXT_SECONDARY,
+    marginTop: 4,
+    alignSelf: "flex-end",
+    opacity: 0.6,
   },
   pendingText: {
     opacity: 0.6,
@@ -793,6 +969,29 @@ const styles = StyleSheet.create({
   },
   ttsToggleText: {
     fontSize: 18,
+  },
+  imagePickerButton: {
+    width: 36,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imagePickerText: {
+    fontSize: 18,
+  },
+  imageClearButton: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: "#FF4444",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 4,
+  },
+  imageClearText: {
+    color: "#FFF",
+    fontSize: 12,
+    fontWeight: "700",
   },
   // Voice call button (waveform icon)
   voiceCallButton: {

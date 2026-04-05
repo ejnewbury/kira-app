@@ -31,8 +31,11 @@ const ELEVENLABS_API_KEY = "sk_ccdf5bc25b5ed14acb1014f8033633ddc37aaaf3bf87b893"
 const KIRA_VOICE_ID = "W9Ar7fndeXRhsFHnuhIG";
 const ELEVENLABS_TTS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${KIRA_VOICE_ID}`;
 
-// Cached reference audio for Voxtral voice cloning
-let refAudioBase64: string | null = null;
+// Cached reference audio for Voxtral voice cloning — per-speaker
+let refAudioBase64: string | null = null;       // Kira's voice
+let qwenRefAudioBase64: string | null = null;   // QwenBoy's JARVIS voice
+let riffRefAudioBase64: string | null = null;   // RiffBot's Bill Corbett voice
+let currentSpeaker: "kira" | "qwenboy" | "riffbot" = "kira";
 
 interface TTSState {
   isInitialized: boolean;
@@ -47,18 +50,39 @@ const state: TTSState = {
 };
 
 async function loadRefAudio(): Promise<void> {
-  if (refAudioBase64) return;
   try {
-    // Load bundled reference clip
-    if (Asset && FileSystem) {
-      const [asset] = await Asset.loadAsync(require("../assets/kira-ref-15s.wav"));
-      if (asset.localUri) {
-        const b64 = await FileSystem.readAsStringAsync(asset.localUri, {
+    if (!Asset || !FileSystem) return;
+
+    // Load Kira's voice
+    if (!refAudioBase64) {
+      const [kiraAsset] = await Asset.loadAsync(require("../assets/kira-ref-15s.wav"));
+      if (kiraAsset.localUri) {
+        refAudioBase64 = await FileSystem.readAsStringAsync(kiraAsset.localUri, {
           encoding: FileSystem.EncodingType.Base64,
         });
-        refAudioBase64 = b64;
-        console.log("[KiraTTS] Loaded Kira reference clip for Voxtral");
-        return;
+        console.log("[KiraTTS] Loaded Kira reference clip");
+      }
+    }
+
+    // Load QwenBoy's JARVIS voice
+    if (!qwenRefAudioBase64) {
+      const [qwenAsset] = await Asset.loadAsync(require("../assets/qwenboy-ref.wav"));
+      if (qwenAsset.localUri) {
+        qwenRefAudioBase64 = await FileSystem.readAsStringAsync(qwenAsset.localUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        console.log("[KiraTTS] Loaded QwenBoy JARVIS reference clip");
+      }
+    }
+
+    // Load RiffBot's Bill Corbett voice
+    if (!riffRefAudioBase64) {
+      const [riffAsset] = await Asset.loadAsync(require("../assets/riffbot-ref.wav"));
+      if (riffAsset.localUri) {
+        riffRefAudioBase64 = await FileSystem.readAsStringAsync(riffAsset.localUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        console.log("[KiraTTS] Loaded RiffBot reference clip");
       }
     }
   } catch (e: any) {
@@ -81,14 +105,16 @@ export async function initializePiperTTS(): Promise<boolean> {
   return false;
 }
 
-export async function speak(text: string): Promise<void> {
+export async function speak(text: string, speaker: "kira" | "qwenboy" | "riffbot" = "kira"): Promise<void> {
   if (!text?.trim()) return;
+  currentSpeaker = speaker;
 
   if (!state.isInitialized) {
     await initializePiperTTS();
   }
 
-  if (state.isInitialized && refAudioBase64) {
+  const ref = speaker === "qwenboy" ? qwenRefAudioBase64 : speaker === "riffbot" ? riffRefAudioBase64 : refAudioBase64;
+  if (state.isInitialized && ref) {
     return speakWithVoxtral(text);
   }
 
@@ -113,7 +139,7 @@ async function speakWithVoxtral(text: string): Promise<void> {
       body: JSON.stringify({
         model: "voxtral-mini-tts-2603",
         input: text.slice(0, 5000),
-        ref_audio: refAudioBase64,
+        ref_audio: currentSpeaker === "qwenboy" ? qwenRefAudioBase64 : currentSpeaker === "riffbot" ? riffRefAudioBase64 : refAudioBase64,
         response_format: "wav",
       }),
     });

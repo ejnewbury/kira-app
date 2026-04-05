@@ -18,12 +18,52 @@ export interface Conversation {
 
 export async function sendMessage(
   message: string,
-  conversationId?: string
+  conversationId?: string,
+  imageBase64?: string
 ): Promise<{ conversationId: string; messageId: string }> {
+  // If image attached, upload to Supabase Storage first (bypasses Vercel 4.5MB limit)
+  let imagePath: string | undefined;
+  if (imageBase64) {
+    try {
+      const { supabase } = require("./supabase");
+      const fileName = `${Date.now()}.jpg`;
+      const filePath = `uploads/${fileName}`;
+
+      // Decode base64 to Uint8Array for upload
+      const binaryStr = atob(imageBase64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        bytes[i] = binaryStr.charCodeAt(i);
+      }
+
+      const { error: uploadErr } = await supabase.storage
+        .from("kira-images")
+        .upload(filePath, bytes.buffer, {
+          contentType: "image/jpeg",
+          upsert: true,
+        });
+
+      if (!uploadErr) {
+        imagePath = filePath;
+        console.log("[API] Image uploaded:", filePath);
+      } else {
+        console.warn("[API] Image upload failed:", uploadErr.message);
+      }
+    } catch (e: any) {
+      console.warn("[API] Image upload error:", e?.message || e);
+    }
+  }
+
+  const body: Record<string, string | undefined> = {
+    message: imagePath ? `[IMAGE:${imagePath}]\n${message || "What's in this image?"}` : message,
+    conversationId,
+    ...(imagePath && { imagePath }),
+  };
+
   const res = await fetch(`${BACKEND_URL}/api/kira/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, conversationId }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Send failed: ${res.status}`);
   return res.json();

@@ -21,6 +21,14 @@
         "credentialsSource": "local",
         "image": "latest"
       }
+    },
+    "production": {
+      "channel": "production",
+      "android": {
+        "buildType": "apk",
+        "credentialsSource": "local",
+        "image": "latest"
+      }
     }
   }
 }

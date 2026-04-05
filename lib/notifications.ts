@@ -55,6 +55,16 @@ export async function registerForPushNotifications(): Promise<string | null> {
       lightColor: "#2A9D8F",
       sound: "default",
     });
+
+    // Doorbell alerts — max priority, breaks through DND
+    await Notifications.setNotificationChannelAsync("doorbell", {
+      name: "Doorbell & Security",
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 500, 200, 500],
+      lightColor: "#FF4444",
+      sound: "default",
+      bypassDnd: true,
+    });
   }
 
   // Get Expo push token
