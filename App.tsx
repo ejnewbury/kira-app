@@ -13,6 +13,7 @@ import {
   StatusBar,
   AppState,
   Image,
+  Linking,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
@@ -454,7 +455,15 @@ function ChatScreen() {
               )}
               {textContent ? (
                 <Text style={[styles.messageText, isPending && styles.pendingText]}>
-                  {textContent}
+                  {textContent.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
+                    /^https?:\/\//.test(part) ? (
+                      <Text key={i} style={styles.linkText} onPress={() => Linking.openURL(part)}>
+                        {part}
+                      </Text>
+                    ) : (
+                      part
+                    )
+                  )}
                 </Text>
               ) : null}
             </>
@@ -900,6 +909,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: TEXT_PRIMARY,
     lineHeight: 22,
+  },
+  linkText: {
+    color: "#4DA8DA",
+    textDecorationLine: "underline" as const,
   },
   timestamp: {
     fontSize: 10,

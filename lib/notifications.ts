@@ -11,15 +11,19 @@ import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import { supabase } from "./supabase";
 
-// Show notifications even when app is foregrounded
+// Silence notifications when app is in foreground (user is already looking at it)
+// Doorbell alerts always show regardless
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
+  handleNotification: async (notification) => {
+    const isDoorbell = notification.request.content.data?.type === "doorbell";
+    return {
+      shouldShowAlert: isDoorbell,    // only show banner for doorbell when foregrounded
+      shouldPlaySound: isDoorbell,    // only play sound for doorbell when foregrounded
+      shouldSetBadge: false,
+      shouldShowBanner: isDoorbell,
+      shouldShowList: true,           // always add to notification list
+    };
+  },
 });
 
 /**
