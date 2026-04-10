@@ -16,7 +16,7 @@ import {
   Linking,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import { sendMessage, getMessages, getConversations, transcribeAudio, Message } from "./lib/api";
+import { sendMessage, getMessages, getConversations, transcribeAudio, getTerminalStatus, sendPowerCommand, Message } from "./lib/api";
 import { useVoiceMode, type VoiceState } from "./lib/useVoiceMode";
 import { pushConversationSummary, pullDesktopContext } from "./lib/context-sync";
 import { useRealtimeMessages } from "./lib/useRealtimeMessages";
@@ -27,8 +27,10 @@ import * as PiperTTS from "./lib/piper-tts";
 import { audioQueue, type Speaker } from "./lib/audio-queue";
 import { registerForPushNotifications } from "./lib/notifications";
 import ChessScreen from "./lib/ChessScreen";
+import NotificationsScreen from "./lib/NotificationsScreen";
 import { supabase } from "./lib/supabase";
 import * as ImagePicker from "expo-image-picker";
+import * as Clipboard from "expo-clipboard";
 
 // App-level chess move listener — survives screen switches
 let pendingChessMoveResolve: ((move: string | null) => void) | null = null;
@@ -100,6 +102,8 @@ function ChatScreen() {
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [terminalOnline, setTerminalOnline] = useState<boolean | null>(null);
+  const [showPowerMenu, setShowPowerMenu] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
   // Realtime subscription replaces polling — instant message delivery
@@ -130,6 +134,14 @@ function ChatScreen() {
         }
       }).catch(() => {});
     })();
+  }, []);
+
+  // Poll terminal status every 30 seconds
+  useEffect(() => {
+    const check = () => getTerminalStatus().then(s => setTerminalOnline(s.online)).catch(() => setTerminalOnline(false));
+    check();
+    const interval = setInterval(check, 30000);
+    return () => clearInterval(interval);
   }, []);
 
   // Push conversation summary when app goes to background or new chat starts
@@ -454,17 +466,33 @@ function ChatScreen() {
                 />
               )}
               {textContent ? (
-                <Text style={[styles.messageText, isPending && styles.pendingText]}>
-                  {textContent.split(/(https?:\/\/[^\s]+)/g).map((part, i) =>
-                    /^https?:\/\//.test(part) ? (
-                      <Text key={i} style={styles.linkText} onPress={() => Linking.openURL(part)}>
-                        {part}
-                      </Text>
-                    ) : (
-                      part
-                    )
-                  )}
-                </Text>
+                <Pressable
+                  onLongPress={() => {
+                    Clipboard.setStringAsync(textContent);
+                    // Brief visual feedback could be added here
+                  }}
+                  delayLongPress={400}
+                >
+                  <Text selectable style={[styles.messageText, isPending && styles.pendingText]}>
+                    {textContent.split(/(https?:\/\/[^\s]+|\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}|[\w.-]+@[\w.-]+\.\w{2,})/g).map((part, i) =>
+                      /^https?:\/\//.test(part) ? (
+                        <Text key={i} style={styles.linkText} onPress={() => Linking.openURL(part)}>
+                          {part}
+                        </Text>
+                      ) : /\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(part) ? (
+                        <Text key={i} style={styles.linkText} onPress={() => Linking.openURL(`tel:${part.replace(/[^\d+]/g, "")}`)}>
+                          {part}
+                        </Text>
+                      ) : /[\w.-]+@[\w.-]+\.\w{2,}/.test(part) ? (
+                        <Text key={i} style={styles.linkText} onPress={() => Linking.openURL(`mailto:${part}`)}>
+                          {part}
+                        </Text>
+                      ) : (
+                        part
+                      )
+                    )}
+                  </Text>
+                </Pressable>
               ) : null}
             </>
           );
@@ -527,8 +555,11 @@ function ChatScreen() {
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <View style={styles.headerDot} />
+            <Pressable onPress={() => setShowPowerMenu(v => !v)} hitSlop={8}>
+              <View style={[styles.headerDot, { backgroundColor: terminalOnline === null ? TEXT_SECONDARY : terminalOnline ? "#4CAF50" : "#FF4444" }]} />
+            </Pressable>
             <Text style={styles.headerTitle}>Kira</Text>
+            <Text style={styles.statusLabel}>{terminalOnline === null ? "" : terminalOnline ? "online" : "offline"}</Text>
             <Pressable onPress={() => checkForAppUpdate(false).catch(() => {})} hitSlop={12}>
               <Text style={styles.versionLabel}>{CURRENT_VERSION.replace("v1.0.", "")}</Text>
             </Pressable>
@@ -544,6 +575,39 @@ function ChatScreen() {
             )}
           </View>
         </View>
+        {/* Power control dropdown */}
+        {showPowerMenu && (
+          <View style={styles.powerMenu}>
+            <Text style={styles.powerMenuTitle}>System Control</Text>
+            <View style={styles.powerMenuRow}>
+              <Pressable
+                style={styles.powerButton}
+                onPress={() => {
+                  sendPowerCommand("desktop", "wake").then(r =>
+                    setMessages(prev => [...prev, { id: `sys-${Date.now()}`, role: "assistant", content: `⚡ Desktop: ${r.message}`, status: "complete", source: "system", created_at: new Date().toISOString() }])
+                  );
+                  setShowPowerMenu(false);
+                }}
+              >
+                <Text style={styles.powerButtonText}>🖥️ Wake Desktop</Text>
+              </Pressable>
+              <Pressable
+                style={styles.powerButton}
+                onPress={() => {
+                  sendPowerCommand("basement", "wake").then(r =>
+                    setMessages(prev => [...prev, { id: `sys-${Date.now()}`, role: "assistant", content: `⚡ Basement: ${r.message}`, status: "complete", source: "system", created_at: new Date().toISOString() }])
+                  );
+                  setShowPowerMenu(false);
+                }}
+              >
+                <Text style={styles.powerButtonText}>🏠 Wake Basement</Text>
+              </Pressable>
+            </View>
+            <Pressable style={styles.powerMenuClose} onPress={() => setShowPowerMenu(false)}>
+              <Text style={styles.powerMenuCloseText}>Close</Text>
+            </Pressable>
+          </View>
+        )}
       </>
       )}
 
@@ -606,6 +670,14 @@ function ChatScreen() {
           </View>
         </Pressable>
 
+        {/* Call Kira (Twilio) */}
+        <Pressable
+          onPress={() => Linking.openURL("tel:+19789042979")}
+          style={styles.phoneCallButton}
+        >
+          <Text style={styles.phoneCallText}>📞</Text>
+        </Pressable>
+
         {/* Image picker */}
         <Pressable onPress={pickImage} onLongPress={takePhoto} style={styles.imagePickerButton}>
           <Text style={styles.imagePickerText}>{pendingImage ? "📷✓" : "📷"}</Text>
@@ -655,7 +727,7 @@ function ChatScreen() {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<"chat" | "chess">("chat");
+  const [screen, setScreen] = useState<"chat" | "chess" | "notifications">("chat");
 
   // Recover missed chess moves when app comes back to foreground
   useEffect(() => {
@@ -696,32 +768,54 @@ export default function App() {
     <SafeAreaProvider>
       {screen === "chess" ? (
         <ChessScreen onClose={() => setScreen("chat")} />
+      ) : screen === "notifications" ? (
+        <NotificationsScreen onClose={() => setScreen("chat")} />
       ) : (
         <View style={{ flex: 1 }}>
           <ChatScreen />
-          {/* Chess button — floating, always on top */}
-          <Pressable
-            style={{
-              position: "absolute",
-              top: 50,
-              right: 16,
-              backgroundColor: "#2A9D8F",
-              width: 44,
-              height: 44,
-              borderRadius: 22,
-              justifyContent: "center",
-              alignItems: "center",
-              elevation: 10,
-              zIndex: 999,
-              shadowColor: "#000",
-              shadowOffset: { width: 0, height: 2 },
-              shadowOpacity: 0.3,
-              shadowRadius: 4,
-            }}
-            onPress={() => setScreen("chess")}
-          >
-            <Text style={{ fontSize: 20 }}>♟</Text>
-          </Pressable>
+          {/* Floating action buttons */}
+          <View style={{ position: "absolute", top: 50, right: 16, gap: 10, zIndex: 999 }}>
+            {/* Notifications button */}
+            <Pressable
+              style={{
+                backgroundColor: "#1A1A1A",
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                justifyContent: "center",
+                alignItems: "center",
+                elevation: 10,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.3,
+                shadowRadius: 4,
+                borderWidth: 1,
+                borderColor: "#333",
+              }}
+              onPress={() => setScreen("notifications")}
+            >
+              <Text style={{ fontSize: 18 }}>🔔</Text>
+            </Pressable>
+            {/* Chess button */}
+            <Pressable
+              style={{
+                backgroundColor: "#2A9D8F",
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                justifyContent: "center",
+                alignItems: "center",
+                elevation: 10,
+                shadowColor: "#000",
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.3,
+                shadowRadius: 4,
+              }}
+              onPress={() => setScreen("chess")}
+            >
+              <Text style={{ fontSize: 20 }}>♟</Text>
+            </Pressable>
+          </View>
         </View>
       )}
     </SafeAreaProvider>
@@ -758,11 +852,56 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: TEXT_PRIMARY,
   },
+  statusLabel: {
+    fontSize: 10,
+    color: TEXT_SECONDARY,
+    marginLeft: 2,
+    opacity: 0.6,
+    textTransform: "lowercase",
+  },
   versionLabel: {
     fontSize: 10,
     color: TEXT_SECONDARY,
     marginLeft: 6,
     opacity: 0.5,
+  },
+  powerMenu: {
+    backgroundColor: SURFACE,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: CARD,
+  },
+  powerMenuTitle: {
+    color: TEXT_PRIMARY,
+    fontSize: 14,
+    fontWeight: "600",
+    marginBottom: 12,
+  },
+  powerMenuRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  powerButton: {
+    flex: 1,
+    backgroundColor: CARD,
+    padding: 12,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  powerButtonText: {
+    color: TEXT_PRIMARY,
+    fontSize: 13,
+  },
+  powerMenuClose: {
+    marginTop: 12,
+    alignItems: "center",
+  },
+  powerMenuCloseText: {
+    color: TEXT_SECONDARY,
+    fontSize: 12,
   },
   headerSubtitle: {
     fontSize: 12,
@@ -981,6 +1120,15 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   ttsToggleText: {
+    fontSize: 18,
+  },
+  phoneCallButton: {
+    width: 36,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phoneCallText: {
     fontSize: 18,
   },
   imagePickerButton: {

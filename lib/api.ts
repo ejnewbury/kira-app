@@ -115,6 +115,39 @@ export interface AgentMessage {
   created_at: string;
 }
 
+/** Check if the terminal (Claude Code) is online by looking for recent activity */
+export async function getTerminalStatus(): Promise<{ online: boolean; lastSeen: string | null }> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/kira/terminal-status`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { online: false, lastSeen: null };
+    const data = await res.json();
+    return { online: data.online ?? false, lastSeen: data.lastSeen ?? null };
+  } catch {
+    return { online: false, lastSeen: null };
+  }
+}
+
+/** Send a power command (wake/sleep) to a machine via smart plug or WoL */
+export async function sendPowerCommand(
+  target: string,
+  action: "wake" | "sleep" | "shutdown" | "status"
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/kira/power-control`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Kira-Api-Key": "ee35a1f1ea15d2ca456089e562a296382511246a28250de47b82520edae92c14",
+      },
+      body: JSON.stringify({ target, action }),
+    });
+    if (!res.ok) return { success: false, message: `Error: ${res.status}` };
+    return await res.json();
+  } catch (e: any) {
+    return { success: false, message: e.message };
+  }
+}
+
 export async function getAgentChat(
   since?: string,
   limit: number = 20
