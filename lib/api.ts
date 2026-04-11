@@ -123,7 +123,10 @@ export async function getTerminalStatus(): Promise<{
   unreadAlerts: number;
 }> {
   try {
-    const res = await fetch(`${BACKEND_URL}/api/kira/terminal-status`, { signal: AbortSignal.timeout(12000) });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    const res = await fetch(`${BACKEND_URL}/api/kira/terminal-status`, { signal: controller.signal });
+    clearTimeout(timeout);
     if (!res.ok) return { online: null, terminalActive: null, lastSeen: null, unreadAlerts: 0 };
     const data = await res.json();
     return {
@@ -132,7 +135,8 @@ export async function getTerminalStatus(): Promise<{
       lastSeen: data.lastSeen ?? null,
       unreadAlerts: data.unreadAlerts ?? 0,
     };
-  } catch {
+  } catch (e) {
+    console.log("[status] fetch failed:", e);
     return { online: null, terminalActive: null, lastSeen: null, unreadAlerts: 0 };
   }
 }
