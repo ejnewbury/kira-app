@@ -7,7 +7,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { View, Text, StyleSheet, Pressable, Alert, ScrollView } from "react-native";
 import { Colors, Typography, Spacing } from "../theme";
-import { getTerminalStatus, sendPowerCommand } from "../api";
+import { getTerminalStatus, sendPowerCommand, sendHomeControl } from "../api";
 import { checkForAppUpdate, CURRENT_VERSION } from "../app-updater";
 
 interface ControlTile {
@@ -21,11 +21,18 @@ interface ControlTile {
 export default function ControlsScreen() {
   const [terminalOnline, setTerminalOnline] = useState<boolean | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [lockStatus, setLockStatus] = useState<"locked" | "unlocked" | "unknown">("unknown");
 
   useEffect(() => {
     getTerminalStatus()
       .then((s) => setTerminalOnline(s.online))
       .catch(() => setTerminalOnline(false));
+    // Get lock status
+    sendHomeControl("status", "jacks-lock")
+      .then((r) => {
+        if (r.status === "pending") showFeedback("Checking lock...");
+      })
+      .catch(() => {});
   }, []);
 
   const showFeedback = (msg: string) => {
@@ -74,29 +81,61 @@ export default function ControlsScreen() {
       id: "jacks-lock",
       label: "JACK'S ROOM",
       icon: "LCK",
-      status: "locked",
-      onPress: () => showFeedback("Lock control coming soon"),
+      status: lockStatus,
+      onPress: () => {
+        const action = lockStatus === "locked" ? "unlock" : "lock";
+        Alert.alert(
+          `${action.toUpperCase()} Jack's Room`,
+          `${action === "lock" ? "Lock" : "Unlock"} the door?`,
+          [
+            { text: "Cancel", style: "cancel" },
+            {
+              text: action.toUpperCase(),
+              onPress: () => {
+                sendHomeControl(action, "jacks-lock")
+                  .then(() => {
+                    showFeedback(`Jack's Room: ${action} command sent`);
+                    setLockStatus(action === "lock" ? "locked" : "unlocked");
+                  })
+                  .catch(() => showFeedback("Lock command failed"));
+              },
+            },
+          ]
+        );
+      },
     },
     {
       id: "doorbell",
       label: "DOORBELL",
       icon: "CAM",
       status: "online",
-      onPress: () => showFeedback("Ring events coming soon"),
+      onPress: () => {
+        sendHomeControl("history", "doorbell")
+          .then(() => showFeedback("Doorbell: checking recent events..."))
+          .catch(() => showFeedback("Doorbell check failed"));
+      },
     },
     {
       id: "phone",
       label: "PHONE",
       icon: "DEV",
       status: "online",
-      onPress: () => showFeedback("Device info coming soon"),
+      onPress: () => {
+        sendHomeControl("info", "phone")
+          .then(() => showFeedback("Phone: checking device info..."))
+          .catch(() => showFeedback("Phone check failed"));
+      },
     },
     {
       id: "system",
       label: "SYSTEM",
       icon: "SYS",
       status: terminalOnline ? "online" : "offline",
-      onPress: () => showFeedback("System diagnostics coming soon"),
+      onPress: () => {
+        sendHomeControl("diagnostics", "system")
+          .then(() => showFeedback("System: running diagnostics..."))
+          .catch(() => showFeedback("Diagnostics failed"));
+      },
     },
   ];
 

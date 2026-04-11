@@ -162,6 +162,24 @@ export async function sendPowerCommand(
   }
 }
 
+/** Send a home control command (lock, unlock, doorbell, system, etc.) */
+export async function sendHomeControl(
+  command: string,
+  target: string,
+  args: Record<string, unknown> = {}
+): Promise<{ id: string; status: string }> {
+  const res = await fetch(`${BACKEND_URL}/api/kira/home-control`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Kira-Api-Key": "ee35a1f1ea15d2ca456089e562a296382511246a28250de47b82520edae92c14",
+    },
+    body: JSON.stringify({ command, target, args }),
+  });
+  if (!res.ok) throw new Error(`Home control failed: ${res.status}`);
+  return await res.json();
+}
+
 export async function getAgentChat(
   since?: string,
   limit: number = 20
