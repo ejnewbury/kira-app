@@ -115,15 +115,25 @@ export interface AgentMessage {
   created_at: string;
 }
 
-/** Check if the terminal (Claude Code) is online by looking for recent activity */
-export async function getTerminalStatus(): Promise<{ online: boolean; lastSeen: string | null }> {
+/** Check Kira system status — backend health, terminal activity, alert count */
+export async function getTerminalStatus(): Promise<{
+  online: boolean | null;
+  terminalActive: boolean | null;
+  lastSeen: string | null;
+  unreadAlerts: number;
+}> {
   try {
-    const res = await fetch(`${BACKEND_URL}/api/kira/terminal-status`, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return { online: false, lastSeen: null };
+    const res = await fetch(`${BACKEND_URL}/api/kira/terminal-status`, { signal: AbortSignal.timeout(12000) });
+    if (!res.ok) return { online: null, terminalActive: null, lastSeen: null, unreadAlerts: 0 };
     const data = await res.json();
-    return { online: data.online ?? false, lastSeen: data.lastSeen ?? null };
+    return {
+      online: data.online ?? false,
+      terminalActive: data.terminalActive ?? false,
+      lastSeen: data.lastSeen ?? null,
+      unreadAlerts: data.unreadAlerts ?? 0,
+    };
   } catch {
-    return { online: false, lastSeen: null };
+    return { online: null, terminalActive: null, lastSeen: null, unreadAlerts: 0 };
   }
 }
 

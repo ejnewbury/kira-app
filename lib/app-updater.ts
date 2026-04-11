@@ -8,10 +8,20 @@
 
 import { Alert, Linking } from "react-native";
 
-// Current app version tag — update this on each release
-export const CURRENT_VERSION = "v1.0.1775821138";
+// Semantic version — bump this on each release
+export const CURRENT_VERSION = "1.3.0";
 
 const BACKEND_URL = "https://kira-backend-six.vercel.app";
+
+function isNewer(remote: string, local: string): boolean {
+  const r = remote.replace(/^v/, "").split(".").map(Number);
+  const l = local.replace(/^v/, "").split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((r[i] || 0) > (l[i] || 0)) return true;
+    if ((r[i] || 0) < (l[i] || 0)) return false;
+  }
+  return false;
+}
 
 export async function checkForAppUpdate(silent: boolean = true): Promise<void> {
   try {
@@ -22,8 +32,8 @@ export async function checkForAppUpdate(silent: boolean = true): Promise<void> {
     }
 
     const data = await res.json();
-    if (!data.version || data.version === CURRENT_VERSION) {
-      if (!silent) Alert.alert("Up to date", `Build: ${CURRENT_VERSION.replace("v1.0.", "")}`);
+    if (!data.version || !isNewer(data.version, CURRENT_VERSION)) {
+      if (!silent) Alert.alert("Up to date", `v${CURRENT_VERSION}`);
       return;
     }
 

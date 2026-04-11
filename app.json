@@ -50,6 +50,7 @@
             "newArchEnabled": true,
             "enableProguardInReleaseBuilds": false,
             "enableMinifyInReleaseBuilds": false,
+            "abiFilters": ["arm64-v8a"],
             "kotlinVersion": "2.0.21",
             "packagingOptions": {
               "pickFirst": ["**/libc++_shared.so"]

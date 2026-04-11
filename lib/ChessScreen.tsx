@@ -6,56 +6,16 @@
 import React, { useCallback, useState } from "react";
 import { View, Text, StyleSheet, SafeAreaView, Pressable } from "react-native";
 import ChessBoard from "./ChessBoard";
-import { setChessMoveResolver, setLastChessCommandId, getLastChessMessage } from "../App";
-
-const BACKEND_URL = "https://kira-backend-six.vercel.app";
-const API_KEY = "ee35a1f1ea15d2ca456089e562a296382511246a28250de47b82520edae92c14";
 
 export default function ChessScreen({ onClose }: { onClose?: () => void }) {
-  const [kiraMessage, setKiraMessage] = useState(getLastChessMessage() || "Let's play! I'm black. Your move.");
+  const [kiraMessage, setKiraMessage] = useState("Let's play! I'm black. Your move.");
 
-  const handleKiraMoveRequest = useCallback(async (fen: string, history: string[]): Promise<string | null> => {
-    try {
-      const lastMove = history[history.length - 1];
-      setKiraMessage("Sending move to Kira...");
-
-      // Send move — backend creates a device_command and long-polls
-      const response = await fetch(`${BACKEND_URL}/api/kira/chess-move`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Kira-Api-Key": API_KEY },
-        body: JSON.stringify({ fen, history, lastMove }),
-      });
-
-      const data = response.ok ? await response.json() : null;
-      if (data?.move) {
-        if (data.message) setKiraMessage(data.message);
-        return data.move;
-      }
-
-      // Kira hasn't responded within the long-poll — wait for Realtime via App-level listener
-      // Track the command ID so AppState recovery can find it
-      if (data?.commandId) setLastChessCommandId(data.commandId);
-      setKiraMessage("Kira is thinking...");
-      return new Promise<string | null>((resolve) => {
-        // Register with app-level resolver
-        setChessMoveResolver((move) => {
-          const msg = getLastChessMessage();
-          if (msg) setKiraMessage(msg);
-          resolve(move);
-        });
-
-        // 5 minute safety timeout
-        setTimeout(() => {
-          setChessMoveResolver(null);
-          setKiraMessage("Kira will move when she's ready.");
-          resolve(null);
-        }, 300000);
-      });
-    } catch (e) {
-      console.warn("Chess move request failed:", e);
-      setKiraMessage("Connection issue. Try again.");
-      return null;
-    }
+  // Kira's moves now come via Supabase Realtime (handled in ChessBoard)
+  // This callback is no longer needed for move requests — just for status messages
+  const handleKiraMoveRequest = useCallback(async (_fen: string, _history: string[]): Promise<string | null> => {
+    setKiraMessage("Kira is thinking...");
+    // Return null — ChessBoard will receive Kira's move via Realtime subscription
+    return null;
   }, []);
 
   const handleGameOver = useCallback((result: string) => {

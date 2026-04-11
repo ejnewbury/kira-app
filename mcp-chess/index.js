@@ -20,19 +20,23 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { z } from "zod";
+import { createClient } from "@supabase/supabase-js";
 
+const SUPABASE_URL = "https://odxjaqwlzjxowfnajygb.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9keGphcXdsemp4b3dmbmFqeWdiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQwOTEyMjQsImV4cCI6MjA4OTY2NzIyNH0.BIcTIZ0800C6p_xCUgkw9pgSq553_nx4h08Eai7NoSM";
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Local fallback for game history
 const GAME_DIR = join(homedir(), ".kira", "chess");
-const GAME_FILE = join(GAME_DIR, "current-game.json");
 const HISTORY_FILE = join(GAME_DIR, "game-history.jsonl");
-
-// Ensure directory exists
 if (!existsSync(GAME_DIR)) mkdirSync(GAME_DIR, { recursive: true });
 
 // ============================================================
-// Game state management
+// Game state management — Supabase is source of truth
 // ============================================================
 
 let chess = new Chess();
+let currentGameId = null;
 let gameMetadata = {
   white: "eric",
   black: "kira",
@@ -41,21 +45,45 @@ let gameMetadata = {
   status: "no_game",
 };
 
-function saveGame() {
-  const state = {
-    fen: chess.fen(),
-    pgn: chess.pgn(),
-    metadata: gameMetadata,
-  };
-  writeFileSync(GAME_FILE, JSON.stringify(state, null, 2));
+async function saveGame() {
+  if (!currentGameId) return;
+  try {
+    await supabase.from("chess_games").update({
+      fen: chess.fen(),
+      pgn: chess.pgn(),
+      moves: chess.history(),
+      current_turn: chess.turn(),
+      last_move: chess.history().length > 0 ? chess.history().slice(-1)[0] : null,
+      last_move_by: chess.turn() === "w" ? gameMetadata.black : gameMetadata.white,
+      status: gameMetadata.status === "active" ? "active" : gameMetadata.status === "complete" ? "completed" : gameMetadata.status,
+      result: gameMetadata.status === "complete" ? (chess.isCheckmate() ? (chess.turn() === "w" ? "black_wins" : "white_wins") : "draw") : null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", currentGameId);
+  } catch (e) {
+    // Silently fail — game continues locally
+  }
 }
 
-function loadGame() {
+async function loadGame() {
   try {
-    if (existsSync(GAME_FILE)) {
-      const data = JSON.parse(readFileSync(GAME_FILE, "utf-8"));
+    const { data } = await supabase
+      .from("chess_games")
+      .select("*")
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (data) {
       chess.load(data.fen);
-      gameMetadata = data.metadata;
+      currentGameId = data.id;
+      gameMetadata = {
+        white: data.white_player,
+        black: data.black_player,
+        difficulty: 10,
+        startedAt: data.created_at,
+        status: "active",
+      };
       return true;
     }
   } catch {}
@@ -219,9 +247,10 @@ server.tool(
     difficulty: z.number().min(1).max(20).default(10).describe("Stockfish difficulty (1-20, only applies when stockfish is a player)"),
   },
   async ({ white, black, difficulty }) => {
-    // Save old game to history if it exists
-    if (gameMetadata.status === "active") {
-      gameMetadata.status = "abandoned";
+    // Mark old game as completed if one exists
+    if (currentGameId && gameMetadata.status === "active") {
+      gameMetadata.status = "resigned";
+      await saveGame();
       saveToHistory();
     }
 
@@ -233,7 +262,22 @@ server.tool(
       startedAt: new Date().toISOString(),
       status: "active",
     };
-    saveGame();
+
+    // Create new game in Supabase
+    try {
+      const { data } = await supabase.from("chess_games").insert({
+        fen: chess.fen(),
+        pgn: "",
+        moves: [],
+        white_player: gameMetadata.white,
+        black_player: gameMetadata.black,
+        status: "active",
+        current_turn: "w",
+      }).select().single();
+      if (data) currentGameId = data.id;
+    } catch (e) {
+      // Continue without server sync
+    }
 
     return {
       content: [{
@@ -505,8 +549,8 @@ server.tool(
 // Start
 // ============================================================
 
-// Load any existing game on startup
-loadGame();
+// Load any existing game from Supabase on startup
+await loadGame();
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

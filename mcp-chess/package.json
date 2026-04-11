@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@supabase/supabase-js": "^2.102.1",
     "chess.js": "^1.0.0-beta.8",
     "stockfish": "^16.0.0"
   }

@@ -8,8 +8,7 @@
  * - Kira's moves via backend/MCP
  */
 
-import React, { useState, useCallback, useEffect } from "react";
-import * as SecureStore from "expo-secure-store";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -21,7 +20,7 @@ import {
 } from "react-native";
 // @ts-ignore — chess.js types
 import { Chess } from "chess.js";
-import { consumePendingKiraMove } from "../App";
+import { supabase } from "./supabase";
 
 const BOARD_SIZE = Math.min(Dimensions.get("window").width - 32, 400);
 const SQUARE_SIZE = BOARD_SIZE / 8;
@@ -32,31 +31,54 @@ const PIECE_SYMBOLS: Record<string, string> = {
   bp: "♟", bn: "♞", bb: "♝", br: "♜", bq: "♛", bk: "♚",
 };
 
-const LIGHT_SQUARE = "#E8D5B5";
-const DARK_SQUARE = "#B58863";
-const SELECTED_COLOR = "rgba(255, 255, 0, 0.4)";
-const LEGAL_MOVE_COLOR = "rgba(0, 200, 0, 0.3)";
-const LAST_MOVE_COLOR = "rgba(100, 150, 255, 0.3)";
+// Mirror's Edge aesthetic — barely visible grid
+const LIGHT_SQUARE = "#FAFAFA";
+const DARK_SQUARE = "#F0F0F0";
+const SELECTED_COLOR = "rgba(255, 68, 34, 0.12)";
+const LEGAL_MOVE_COLOR = "rgba(255, 68, 34, 0.08)";
+const LAST_MOVE_COLOR = "rgba(0, 200, 255, 0.1)";
 
 // Module-level game instance — survives screen switches
 let persistentGame: InstanceType<typeof Chess> | null = null;
-const CHESS_STORAGE_KEY = "kira_chess_fen";
+let currentGameId: string | null = null;
 
 function getGame(): InstanceType<typeof Chess> {
   if (!persistentGame) persistentGame = new Chess();
   return persistentGame;
 }
 
-async function saveGame(game: any) {
+async function saveGameToSupabase(game: any) {
+  if (!currentGameId) return;
   try {
-    await SecureStore.setItemAsync(CHESS_STORAGE_KEY, game.fen());
+    const history = game.history();
+    await supabase.from("chess_games").update({
+      fen: game.fen(),
+      pgn: game.pgn(),
+      moves: history,
+      current_turn: game.turn(),
+      last_move: history.length > 0 ? history[history.length - 1] : null,
+      last_move_by: game.turn() === "w" ? "kira" : "eric",
+      status: game.isGameOver() ? "completed" : "active",
+      updated_at: new Date().toISOString(),
+    }).eq("id", currentGameId);
   } catch {}
 }
 
-async function loadSavedGame(): Promise<string | null> {
+async function loadGameFromSupabase(): Promise<string | null> {
   try {
-    return await SecureStore.getItemAsync(CHESS_STORAGE_KEY);
-  } catch { return null; }
+    const { data } = await supabase
+      .from("chess_games")
+      .select("*")
+      .eq("status", "active")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+    if (data) {
+      currentGameId = data.id;
+      return data.fen;
+    }
+  } catch {}
+  return null;
 }
 
 interface ChessBoardProps {
@@ -78,30 +100,14 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
   });
   const [gameOver, setGameOver] = useState(() => game.isGameOver());
 
-  // Restore board state on mount — from memory or AsyncStorage
+  // Restore board state from Supabase on mount + subscribe to Realtime
   useEffect(() => {
     (async () => {
-      // If persistent game is empty (app was killed), try loading from storage
-      if (game.history().length === 0) {
-        const savedFen = await loadSavedGame();
-        if (savedFen && savedFen !== "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") {
-          try {
-            game.load(savedFen);
-          } catch {}
-        }
-      }
-      // Check if a Kira move arrived while we were unmounted
-      const pendingMove = consumePendingKiraMove();
-      if (pendingMove && game.turn() === "b") {
+      // Load active game from Supabase
+      const savedFen = await loadGameFromSupabase();
+      if (savedFen && savedFen !== "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") {
         try {
-          let result = game.move(pendingMove);
-          if (!result) {
-            result = game.move({ from: pendingMove.substring(0, 2), to: pendingMove.substring(2, 4), promotion: pendingMove[4] || undefined });
-          }
-          if (result) {
-            setLastMove({ from: result.from, to: result.to });
-            saveGame(game);
-          }
+          game.load(savedFen);
         } catch {}
       }
 
@@ -113,13 +119,53 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
         setStatus(game.turn() === "w" ? "Your move (White)" : "Kira thinking...");
       }
     })();
+
+    // Subscribe to Realtime updates for Kira's moves
+    // Note: filter uses currentGameId which is now set by loadGameFromSupabase above
+    const gameIdForFilter = currentGameId;
+    if (!gameIdForFilter) return; // No game to subscribe to yet
+    const channel = supabase
+      .channel("chess-moves")
+      .on("postgres_changes", {
+        event: "UPDATE",
+        schema: "public",
+        table: "chess_games",
+        filter: `id=eq.${gameIdForFilter}`,
+      }, (payload: any) => {
+        const row = payload.new;
+        // Only process if it's now Eric's turn (Kira just moved)
+        if (row.current_turn === "w" && row.last_move_by === "kira") {
+          try {
+            game.load(row.fen);
+            const history = game.history();
+            setBoard([...game.board()]);
+            setMoveHistory([...history]);
+            setIsKiraThinking(false);
+            if (row.last_move) {
+              // Find the last move's from/to for highlighting
+              const tempGame = new Chess(row.fen);
+              tempGame.undo();
+              const lastMoveObj = tempGame.move(row.last_move);
+              if (lastMoveObj) setLastMove({ from: lastMoveObj.from, to: lastMoveObj.to });
+            }
+            if (game.isGameOver()) {
+              setGameOver(true);
+            } else {
+              setStatus("Your move (White)");
+            }
+          } catch {}
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
   const updateBoard = useCallback(() => {
     setBoard([...game.board()]);
     const history = game.history();
     setMoveHistory([...history]);
-    saveGame(game); // Persist after every move
+    saveGameToSupabase(game); // Persist to Supabase after every move
 
     if (game.isCheckmate()) {
       const winner = game.turn() === "w" ? "Kira" : "Eric";
@@ -228,10 +274,24 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
     [game, selectedSquare, gameOver, isKiraThinking, updateBoard]
   );
 
-  const newGame = useCallback(() => {
+  const newGame = useCallback(async () => {
+    // Mark old game as completed
+    if (currentGameId) {
+      await supabase.from("chess_games").update({ status: "completed" }).eq("id", currentGameId);
+    }
     persistentGame = new Chess();
     game.reset();
-    SecureStore.deleteItemAsync(CHESS_STORAGE_KEY).catch(() => {});
+    // Create new game in Supabase
+    try {
+      const { data } = await supabase.from("chess_games").insert({
+        fen: game.fen(),
+        white_player: "eric",
+        black_player: "kira",
+        status: "active",
+        current_turn: "w",
+      }).select().single();
+      if (data) currentGameId = data.id;
+    } catch {}
     setSelectedSquare(null);
     setLegalMoves([]);
     setLastMove(null);
@@ -352,7 +412,7 @@ export default function ChessBoard({ onGameOver, onKiraMoveRequest }: ChessBoard
       {isKiraThinking && (
         <ActivityIndicator
           size="small"
-          color="#2A9D8F"
+          color="#FF4422"
           style={{ marginTop: 8 }}
         />
       )}
@@ -388,16 +448,17 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   status: {
-    color: "#E0E0E0",
-    fontSize: 18,
-    fontWeight: "600",
-    marginBottom: 12,
+    color: "#1A1C1C",
+    fontSize: 11,
+    fontWeight: "500",
+    letterSpacing: 3,
+    textTransform: "uppercase",
+    marginBottom: 16,
   },
   board: {
     flexDirection: "column",
-    borderWidth: 2,
-    borderColor: "#5D4E37",
-    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "#E8E8E8",
     overflow: "hidden",
   },
   square: {
@@ -407,33 +468,32 @@ const styles = StyleSheet.create({
   },
   piece: {
     textAlign: "center",
+    color: "#1A1C1C",
   },
   blackPiece: {
-    textShadowColor: "rgba(0,0,0,0.3)",
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 2,
+    color: "#FF4422",
   },
   legalMoveIndicator: {
     position: "absolute",
     zIndex: 1,
   },
   legalMoveDot: {
-    width: SQUARE_SIZE * 0.3,
-    height: SQUARE_SIZE * 0.3,
-    borderRadius: SQUARE_SIZE * 0.15,
+    width: SQUARE_SIZE * 0.25,
+    height: SQUARE_SIZE * 0.25,
     backgroundColor: LEGAL_MOVE_COLOR,
   },
   legalMoveCapture: {
     width: SQUARE_SIZE * 0.9,
     height: SQUARE_SIZE * 0.9,
-    borderRadius: SQUARE_SIZE * 0.45,
-    borderWidth: 3,
+    borderWidth: 2,
     borderColor: LEGAL_MOVE_COLOR,
   },
   label: {
     position: "absolute",
-    fontSize: 9,
-    fontWeight: "700",
+    fontSize: 8,
+    fontWeight: "400",
+    letterSpacing: 1,
+    color: "#CCCCCC",
   },
   rankLabel: {
     top: 2,
@@ -444,8 +504,8 @@ const styles = StyleSheet.create({
     right: 3,
   },
   historyContainer: {
-    maxHeight: 40,
-    marginTop: 12,
+    maxHeight: 32,
+    marginTop: 16,
     maxWidth: BOARD_SIZE,
   },
   historyContent: {
@@ -454,24 +514,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   moveText: {
-    color: "#AAA",
-    fontSize: 14,
+    color: "#999",
+    fontSize: 10,
     fontFamily: "monospace",
+    letterSpacing: 1,
+    textTransform: "uppercase",
   },
   controls: {
     flexDirection: "row",
-    marginTop: 12,
+    marginTop: 16,
     gap: 12,
   },
   button: {
-    backgroundColor: "#2A9D8F",
+    backgroundColor: "#FF4422",
     paddingHorizontal: 24,
     paddingVertical: 10,
-    borderRadius: 8,
+    borderRadius: 20,
   },
   buttonText: {
     color: "#FFF",
-    fontWeight: "700",
-    fontSize: 16,
+    fontWeight: "600",
+    fontSize: 11,
+    letterSpacing: 2,
+    textTransform: "uppercase",
   },
 });

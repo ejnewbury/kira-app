@@ -31,23 +31,23 @@ interface KiraOrbProps {
 function getCanvasHTML(): string {
   return `<!DOCTYPE html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<style>*{margin:0;padding:0}body{background:#0A0A0F;overflow:hidden}canvas{display:block}</style>
+<style>*{margin:0;padding:0}body{background:#FAFAFA;overflow:hidden}canvas{display:block}</style>
 </head><body><canvas id="c"></canvas>
 <script>
 const canvas=document.getElementById('c');
 const ctx=canvas.getContext('2d');
 let W,H,state='idle',t=0;
-let cp={r:26,g:107,b:107,glow:0.025,ring:0.1,core:0.03,exit:0.03};
+let cp={r:255,g:68,b:34,glow:0.015,ring:0.06,core:0.02,exit:0.02};
 let tp={...cp};
 
 function resize(){W=canvas.width=window.innerWidth;H=canvas.height=window.innerHeight}
 window.addEventListener('resize',resize);resize();
 
 const palettes={
-  idle:{r:26,g:107,b:107,glow:0.025,ring:0.1,core:0.03,exit:0.03},
-  listening:{r:42,g:157,b:143,glow:0.06,ring:0.22,core:0.08,exit:0.1},
-  speaking:{r:0,g:229,b:204,glow:0.14,ring:0.4,core:0.25,exit:0.3},
-  thinking:{r:107,g:125,b:179,glow:0.04,ring:0.15,core:0.06,exit:0.05}
+  idle:{r:255,g:68,b:34,glow:0.015,ring:0.06,core:0.02,exit:0.02},
+  listening:{r:255,g:68,b:34,glow:0.05,ring:0.2,core:0.08,exit:0.1},
+  speaking:{r:255,g:68,b:34,glow:0.14,ring:0.4,core:0.3,exit:0.3},
+  thinking:{r:0,g:200,b:255,glow:0.03,ring:0.12,core:0.05,exit:0.04}
 };
 
 let liveAmp=0,targetAmp=0;
@@ -285,7 +285,7 @@ export default function KiraOrb({ state, audioLevel = 0 }: KiraOrbProps) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0A0A0F",
+    backgroundColor: "#FAFAFA",
   },
   webview: {
     flex: 1,
