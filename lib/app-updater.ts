@@ -9,7 +9,7 @@
 import { Alert, Linking } from "react-native";
 
 // Semantic version — bump this on each release
-export const CURRENT_VERSION = "1.10.3";
+export const CURRENT_VERSION = "1.10.4";
 
 const BACKEND_URL = "https://kira-backend-six.vercel.app";
 
