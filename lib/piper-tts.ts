@@ -20,9 +20,26 @@ try { FileSystem = require("expo-file-system/legacy"); } catch {
 }
 try { Asset = require("expo-asset").Asset; } catch {}
 
-export type TTSEngine = "voxtral" | "elevenlabs" | "system" | "none";
+export type TTSEngine = "mithra" | "voxtral" | "elevenlabs" | "system" | "none";
 
-// Voxtral (primary — $16/1M chars)
+// Mithra (home Qwen3-TTS 1.7B Kira fine-tune — exposed via Cloudflare Tunnel)
+// No timeouts, no skip-windows: fallback only on real failure (HTTP 4xx/5xx, fetch errors, malformed audio).
+const MITHRA_TTS_URL = "https://item-positive-lake-marie.trycloudflare.com/tts";
+const MITHRA_API_KEY = "1e393a1a659a61e45f92381f55c41cec439affa1b999bd1378441d0d242db839";
+
+// Fire-and-forget telemetry POST so we can trace which branch of the TTS chain fired.
+// Server side: /api/kira/tts-log writes to Supabase. Failures are swallowed.
+async function logTTS(event: string, extra: Record<string, any> = {}): Promise<void> {
+  try {
+    await fetch("https://kira-backend-six.vercel.app/api/kira/tts-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event, ts: Date.now(), ...extra }),
+    });
+  } catch {}
+}
+
+// Voxtral (fallback — $16/1M chars)
 const MISTRAL_API_KEY = "SYEDhXJ7VQk34cvmM6zZCn4jPQBKxQi1";
 const VOXTRAL_TTS_URL = "https://api.mistral.ai/v1/audio/speech";
 
@@ -108,21 +125,176 @@ export async function initializePiperTTS(): Promise<boolean> {
 export async function speak(text: string, speaker: "kira" | "qwenboy" | "riffbot" = "kira"): Promise<void> {
   if (!text?.trim()) return;
   currentSpeaker = speaker;
+  logTTS("speak.enter", { speaker, chars: text.length });
 
   if (!state.isInitialized) {
     await initializePiperTTS();
   }
 
+  // Try Mithra first for Kira's own voice only (QwenBoy / RiffBot still route through Voxtral).
+  // No separate /health probe — a successful /tts IS the probe. Cuts the round-trip.
+  if (speaker === "kira") {
+    const ok = await speakWithMithra(text);
+    if (ok) return;
+    logTTS("mithra.fallthrough", { next: "voxtral" });
+  }
+
   const ref = speaker === "qwenboy" ? qwenRefAudioBase64 : speaker === "riffbot" ? riffRefAudioBase64 : refAudioBase64;
   if (state.isInitialized && ref) {
+    logTTS("voxtral.attempt", { speaker });
     return speakWithVoxtral(text);
   }
 
   if (state.isInitialized) {
+    logTTS("elevenlabs.attempt", { speaker });
     return speakWithElevenLabs(text);
   }
 
+  logTTS("system.fallback", { speaker });
   return speakWithSystem(text);
+}
+
+// Split text into sentence-sized chunks so we can pipeline synth + playback.
+// Regex grabs runs ending in .?! (keeping the punctuation) OR a final trailing fragment.
+// Tiny chunks (<12 chars) merge into the previous chunk, or if there's no previous,
+// into the next — so "v1.10 is shipping." doesn't split at "v1." + "10 is shipping."
+// and "One? Two! Three." doesn't become three micro-fragments.
+function splitSentences(text: string): string[] {
+  const raw = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+  const trimmed = raw.map(s => s.trim()).filter(s => s.length > 0);
+  const cleaned: string[] = [];
+  for (let i = 0; i < trimmed.length; i++) {
+    const t = trimmed[i];
+    if (t.length < 12) {
+      if (cleaned.length > 0) {
+        cleaned[cleaned.length - 1] += " " + t;
+      } else if (i + 1 < trimmed.length) {
+        trimmed[i + 1] = t + " " + trimmed[i + 1];
+      } else {
+        cleaned.push(t);
+      }
+    } else {
+      cleaned.push(t);
+    }
+  }
+  return cleaned.length > 0 ? cleaned : [text];
+}
+
+// Hang-detector (not a premature-fallback timeout): real synth is ~5s; 45s means the
+// connection is genuinely dead. Without this, a single stalled fetch blocks the whole
+// pipeline forever since there's no progress-based detection in RN fetch.
+const MITHRA_HANG_DETECT_MS = 45000;
+
+async function synthMithraFragment(text: string): Promise<ArrayBuffer | null> {
+  const ctrl = new AbortController();
+  const hangTimer = setTimeout(() => ctrl.abort(), MITHRA_HANG_DETECT_MS);
+  try {
+    const res = await fetch(MITHRA_TTS_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Kira-Api-Key": MITHRA_API_KEY,
+      },
+      body: JSON.stringify({
+        text: text.slice(0, 2000),
+        language: "english",
+        speaker: "kira",
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      logTTS("mithra.stream.fragment.http-error", { status: res.status });
+      return null;
+    }
+    return await res.arrayBuffer();
+  } catch (e: any) {
+    // AbortError here means the hang detector fired — log it distinctly so we can see
+    // server hangs in telemetry without conflating with real network failures.
+    const err = String(e?.name === "AbortError" ? "hang-detected" : e?.message || e);
+    logTTS("mithra.stream.fragment.fetch-error", { err });
+    return null;
+  } finally {
+    clearTimeout(hangTimer);
+  }
+}
+
+async function playWavBuffer(audioData: ArrayBuffer, tempName: string): Promise<void> {
+  const bytes = new Uint8Array(audioData);
+  let base64 = "";
+  for (let i = 0; i < bytes.length; i += 8192) {
+    base64 += String.fromCharCode(...bytes.slice(i, i + 8192));
+  }
+  base64 = btoa(base64);
+  const tempPath = `${FileSystem.cacheDirectory}${tempName}`;
+  await FileSystem.writeAsStringAsync(tempPath, base64, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+  const { sound } = await Audio.Sound.createAsync({ uri: tempPath }, { shouldPlay: true });
+  state.currentSound = sound;
+  await new Promise<void>((resolve) => {
+    sound.setOnPlaybackStatusUpdate((status: any) => {
+      if (status.didJustFinish) {
+        sound.unloadAsync().catch(() => {});
+        resolve();
+      }
+    });
+  });
+}
+
+async function speakWithMithra(text: string): Promise<boolean> {
+  if (!FileSystem) {
+    logTTS("mithra.synth.skip", { reason: "no-filesystem" });
+    return false;
+  }
+  if (state.isSpeaking) await stop();
+  state.isSpeaking = true;
+
+  const t0 = Date.now();
+  const sentences = splitSentences(text);
+  logTTS("mithra.stream.start", { chars: text.length, fragments: sentences.length });
+
+  // Pipeline depth 2: at most one fragment synthesizing while another plays.
+  // Mithra has one GPU; firing N parallel requests just time-slices it and makes each
+  // N× slower (learned the hard way in v1.10.0). So we prefetch exactly one ahead.
+  try {
+    let firstPlayed = false;
+    let nextTask: Promise<ArrayBuffer | null> | null = null;
+
+    for (let i = 0; i < sentences.length; i++) {
+      // Use the already-in-flight prefetch if present, otherwise start synth for i.
+      const currentTask = nextTask ?? synthMithraFragment(sentences[i]).catch(() => null);
+      // Prefetch i+1 while we wait for i (and then play it).
+      nextTask = i + 1 < sentences.length
+        ? synthMithraFragment(sentences[i + 1]).catch(() => null)
+        : null;
+
+      const audioBuf = await currentTask;
+      if (!audioBuf) {
+        logTTS("mithra.stream.fragment.failed", { idx: i });
+        if (i === 0 && !firstPlayed) {
+          state.isSpeaking = false;
+          return false;
+        }
+        continue;
+      }
+
+      if (!firstPlayed) {
+        logTTS("mithra.stream.first-audio", { ms: Date.now() - t0, idx: i });
+        firstPlayed = true;
+      }
+
+      await playWavBuffer(audioBuf, `kira-mithra-${i}.wav`);
+    }
+    state.isSpeaking = false;
+    state.currentSound = null;
+    logTTS("mithra.stream.done", { ms: Date.now() - t0, fragments: sentences.length });
+    return firstPlayed;
+  } catch (e: any) {
+    logTTS("mithra.stream.exception", { err: String(e?.message || e), ms: Date.now() - t0 });
+    console.warn("[KiraTTS] Mithra streaming error:", e?.message || e);
+    state.isSpeaking = false;
+    return false;
+  }
 }
 
 async function speakWithVoxtral(text: string): Promise<void> {
@@ -281,7 +453,7 @@ export async function destroy(): Promise<void> {
 }
 
 export function getActiveEngine(): TTSEngine {
-  if (state.isInitialized && refAudioBase64) return "voxtral";
+  if (state.isInitialized && refAudioBase64) return "mithra";
   if (state.isInitialized) return "elevenlabs";
   if (Speech) return "system";
   return "none";

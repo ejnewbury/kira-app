@@ -10,7 +10,7 @@
 
 import * as PiperTTS from "./piper-tts";
 
-export type Speaker = "kira" | "qwenboy" | "riffbot" | "system" | null;
+export type Speaker = "kira" | "vex" | "qwenboy" | "riffbot" | "system" | null;
 
 interface QueueItem {
   text: string;
@@ -116,7 +116,14 @@ class AudioQueueManager {
     this.setSpeaker(item.speaker, item.messageId);
 
     try {
-      const ttsSpeaker = item.speaker === "qwenboy" ? "qwenboy" : item.speaker === "riffbot" ? "riffbot" : "kira";
+      // Vex doesn't have a Piper voice yet — route her through Kira's voice for
+      // now. Replace with a Vex-specific voice model once we fine-tune one.
+      const ttsSpeaker =
+        item.speaker === "qwenboy"
+          ? "qwenboy"
+          : item.speaker === "riffbot"
+          ? "riffbot"
+          : "kira";
       await PiperTTS.speak(item.text, ttsSpeaker);
     } catch (e) {
       console.warn("[AudioQueue] Playback error:", e);

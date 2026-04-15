@@ -11,7 +11,7 @@ import {
   Image, Linking,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { sendMessage, getMessages, getConversations, transcribeAudio, getTerminalStatus, Message } from "../api";
+import { sendMessage, getMessages, getConversations, transcribeAudio, getTerminalStatus, Message, Recipient } from "../api";
 import { useVoiceMode, type VoiceState } from "../useVoiceMode";
 import { pushConversationSummary, pullDesktopContext } from "../context-sync";
 import { useRealtimeMessages } from "../useRealtimeMessages";
@@ -43,6 +43,9 @@ export default function ChatScreen() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [terminalOnline, setTerminalOnline] = useState<boolean | null>(null);
+  // Who the next outbound message is addressed to. 'kira' default preserves
+  // historical behavior; 'vex' routes only to her; 'both' fires to both agents.
+  const [recipient, setRecipient] = useState<Recipient>("kira");
   const flatListRef = useRef<FlatList>(null);
 
   // Realtime subscription
@@ -154,7 +157,7 @@ export default function ChatScreen() {
       const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: text, status: "pending", created_at: new Date().toISOString() };
       setMessages((prev) => [...prev, tempMsg]);
       try {
-        const result = await sendMessage(text, conversationId || undefined);
+        const result = await sendMessage(text, conversationId || undefined, undefined, recipient);
         setConversationId(result.conversationId);
         const real = await getMessages(result.conversationId);
         setMessages(real);
@@ -180,7 +183,11 @@ export default function ChatScreen() {
       const newMsgs = messages.slice(prevMessageCountRef.current);
       for (const msg of newMsgs) {
         if (msg.role === "assistant" && msg.status === "complete") {
-          const speaker: Speaker = msg.source === "qwenboy" ? "qwenboy" : msg.source === "riffbot" ? "riffbot" : "kira";
+          const speaker: Speaker =
+            msg.source === "qwenboy" ? "qwenboy"
+            : msg.source === "riffbot" ? "riffbot"
+            : msg.source === "vex" ? "vex"
+            : "kira";
           audioQueue.enqueue(msg.content, speaker, msg.id);
         }
       }
@@ -219,7 +226,7 @@ export default function ChatScreen() {
     const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: displayText, status: "pending", created_at: new Date().toISOString() };
     setMessages((prev) => [...prev, tempMsg]);
     try {
-      const result = await sendMessage(text || "What's in this image?", conversationId || undefined, image || undefined);
+      const result = await sendMessage(text || "What's in this image?", conversationId || undefined, image || undefined, recipient);
       setConversationId(result.conversationId);
       // Don't fetch messages here — Realtime listener handles dedup and will
       // replace the temp message with the real one. Fetching causes double-post.
@@ -237,6 +244,7 @@ export default function ChatScreen() {
     const isUser = item.role === "user";
     const isQwen = item.source === "qwenboy";
     const isRiff = item.source === "riffbot";
+    const isVex = item.source === "vex";
     const isPending = item.status === "pending" || item.status === "processing";
     const isSpeaking = speakingMessageId === item.id && activeSpeaker !== null;
     const canSpeak = !isUser && !isPending && ttsEnabled;
@@ -244,6 +252,7 @@ export default function ChatScreen() {
     const senderName = isUser ? "ERIC"
       : isRiff ? "RIFFBOT"
       : isQwen ? "QWENBOY"
+      : isVex ? "VEX"
       : item.source === "terminal" ? "KIRA · TERMINAL"
       : "KIRA";
 
@@ -253,6 +262,7 @@ export default function ChatScreen() {
         isUser ? styles.sentBubble : styles.receivedBubble,
         isQwen && styles.qwenBubble,
         isRiff && styles.riffBubble,
+        isVex && styles.vexBubble,
         isSpeaking && styles.speakingBubble,
       ]}>
         <View style={styles.senderRow}>
@@ -261,6 +271,7 @@ export default function ChatScreen() {
             isUser && styles.sentLabel,
             isQwen && styles.qwenLabel,
             isRiff && styles.riffLabel,
+            isVex && styles.vexLabel,
           ]}>
             {senderName}
           </Text>
@@ -272,7 +283,7 @@ export default function ChatScreen() {
             </View>
           )}
           {canSpeak && !isSpeaking && (
-            <Pressable onPress={() => audioQueue.enqueue(item.content, isQwen ? "qwenboy" : "kira", item.id)} hitSlop={8}>
+            <Pressable onPress={() => audioQueue.enqueue(item.content, isQwen ? "qwenboy" : isVex ? "vex" : "kira", item.id)} hitSlop={8}>
               <Text style={styles.speakerIcon}>▸</Text>
             </Pressable>
           )}
@@ -351,7 +362,25 @@ export default function ChatScreen() {
         <>
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>KIRA</Text>
+            {/* Recipient picker replaces the static KIRA wordmark. Tap cycles
+                addressee for the NEXT outbound message. Current selection
+                renders in primary red; the others sit as faint textSecondary. */}
+            <View style={styles.recipientPicker}>
+              {(["kira", "both", "vex"] as Recipient[]).map((r, i) => (
+                <React.Fragment key={r}>
+                  {i > 0 && <Text style={styles.recipientDivider}>|</Text>}
+                  <Pressable onPress={() => setRecipient(r)} hitSlop={8}>
+                    <Text style={[
+                      styles.recipientOption,
+                      recipient === r && styles.recipientOptionActive,
+                      recipient === r && r === "vex" && styles.recipientOptionActiveVex,
+                    ]}>
+                      {r.toUpperCase()}
+                    </Text>
+                  </Pressable>
+                </React.Fragment>
+              ))}
+            </View>
             <View style={styles.headerRight}>
               <View style={[styles.statusDot, { backgroundColor: terminalOnline ? Colors.green : terminalOnline === false ? Colors.red : Colors.textFaint }]} />
               <Pressable onPress={syncMessages} hitSlop={12}>
@@ -524,6 +553,9 @@ const styles = StyleSheet.create({
   riffBubble: {
     backgroundColor: Colors.riffBubble,
   },
+  vexBubble: {
+    backgroundColor: Colors.vexBubble,
+  },
   speakingBubble: {
     borderWidth: 1,
     borderColor: Colors.primary,
@@ -547,6 +579,33 @@ const styles = StyleSheet.create({
   },
   riffLabel: {
     color: "#E8B830",
+  },
+  vexLabel: {
+    color: Colors.vexLabel,
+  },
+  recipientPicker: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  recipientOption: {
+    fontSize: 11,
+    fontWeight: "400",
+    letterSpacing: 3,
+    color: Colors.textSecondary,
+    textTransform: "uppercase",
+  },
+  recipientOptionActive: {
+    color: Colors.primary,
+    fontWeight: "500",
+  },
+  recipientOptionActiveVex: {
+    color: Colors.vexLabel,
+  },
+  recipientDivider: {
+    color: Colors.textFaint,
+    fontSize: 11,
+    fontWeight: "200",
   },
   speakingDots: {
     flexDirection: "row",

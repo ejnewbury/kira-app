@@ -16,10 +16,13 @@ export interface Conversation {
   updated_at: string;
 }
 
+export type Recipient = "kira" | "vex" | "both";
+
 export async function sendMessage(
   message: string,
   conversationId?: string,
-  imageBase64?: string
+  imageBase64?: string,
+  recipient: Recipient = "kira"
 ): Promise<{ conversationId: string; messageId: string }> {
   // If image attached, upload to Supabase Storage first (bypasses Vercel 4.5MB limit)
   let imagePath: string | undefined;
@@ -57,6 +60,7 @@ export async function sendMessage(
   const body: Record<string, string | undefined> = {
     message: imagePath ? `[IMAGE:${imagePath}]\n${message || "What's in this image?"}` : message,
     conversationId,
+    recipient,
     ...(imagePath && { imagePath }),
   };
 

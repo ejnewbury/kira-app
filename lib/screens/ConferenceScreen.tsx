@@ -137,16 +137,8 @@ export default function ConferenceScreen() {
       if (!sid) { setThinking(false); return; }
     }
 
-    // Add Eric's message locally
-    const ericMsg: ConferenceMessage = {
-      id: `local-${Date.now()}`,
-      agent: "eric",
-      content: text,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, ericMsg]);
-
-    // Save Eric's message to DB
+    // Save Eric's message to DB. The Realtime subscription above will pick up the
+    // INSERT and append it to messages — DON'T add it locally too or it doubles.
     try {
       await supabase.from("conference_messages").insert({
         session_id: sid,

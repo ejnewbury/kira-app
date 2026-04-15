@@ -40,6 +40,10 @@ export const Colors = {
   receivedText: "#1A1C1C",
   qwenBubble: "#E3F2FD",
   riffBubble: "#FFF8E1",
+  // Vex — Kira's sharper-edged little sister. Deeper, moodier red so her
+  // bubbles read as "Kira's family" without colliding with the primary.
+  vexBubble: "#F5DADA",
+  vexLabel: "#C84A4A",
 
   // Notification source colors
   sentry: "#E03E2F",

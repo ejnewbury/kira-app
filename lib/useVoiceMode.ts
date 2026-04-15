@@ -42,7 +42,7 @@ interface UseVoiceModeOptions {
 interface UseVoiceModeReturn {
   state: VoiceState;
   vadEngine: VADEngine;
-  ttsEngine: "piper" | "system" | "none";
+  ttsEngine: "mithra" | "voxtral" | "elevenlabs" | "system" | "none";
   isActive: boolean;
   audioLevel: number;
   start: () => Promise<void>;
