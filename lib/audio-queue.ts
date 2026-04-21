@@ -10,7 +10,7 @@
 
 import * as PiperTTS from "./piper-tts";
 
-export type Speaker = "kira" | "vex" | "qwenboy" | "riffbot" | "system" | null;
+export type Speaker = "kira" | "vex" | "isaac" | "qwenboy" | "riffbot" | "system" | null;
 
 interface QueueItem {
   text: string;

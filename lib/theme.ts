@@ -45,6 +45,11 @@ export const Colors = {
   vexBubble: "#F5DADA",
   vexLabel: "#C84A4A",
 
+  // Isaac — the engineer brother. Warm amber/orange nods to Isaac Clarke's
+  // RIG engineering suit, sits apart from Kira-red and Vex-rose.
+  isaacBubble: "#F5E4CC",
+  isaacLabel: "#C87A2A",
+
   // Notification source colors
   sentry: "#E03E2F",
   vercel: "#333333",

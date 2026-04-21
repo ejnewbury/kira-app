@@ -5,7 +5,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   status: string;
-  source?: string; // "user" | "terminal" | "daemon" | "system"
+  source?: string; // "user" | "terminal" | "daemon" | "system" | "kira" | "vex" | "isaac" | "qwenboy" | "riffbot"
+  recipient?: string; // who the message is addressed to — "kira" | "vex" | "isaac" | "both"
   created_at: string;
 }
 
@@ -16,7 +17,7 @@ export interface Conversation {
   updated_at: string;
 }
 
-export type Recipient = "kira" | "vex" | "both";
+export type Recipient = "kira" | "vex" | "isaac" | "both";
 
 export async function sendMessage(
   message: string,

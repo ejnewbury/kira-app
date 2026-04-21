@@ -154,7 +154,7 @@ export default function ChatScreen() {
   const voiceMode = useVoiceMode({
     onTranscription: async (text) => {
       setSending(true);
-      const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: text, status: "pending", created_at: new Date().toISOString() };
+      const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: text, status: "pending", recipient, created_at: new Date().toISOString() };
       setMessages((prev) => [...prev, tempMsg]);
       try {
         const result = await sendMessage(text, conversationId || undefined, undefined, recipient);
@@ -187,6 +187,7 @@ export default function ChatScreen() {
             msg.source === "qwenboy" ? "qwenboy"
             : msg.source === "riffbot" ? "riffbot"
             : msg.source === "vex" ? "vex"
+            : msg.source === "isaac" ? "isaac"
             : "kira";
           audioQueue.enqueue(msg.content, speaker, msg.id);
         }
@@ -223,7 +224,7 @@ export default function ChatScreen() {
     setPendingImage(null);
     if (showActions) setShowActions(false);
     const displayText = image ? `📷 ${text || "What's in this image?"}` : text;
-    const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: displayText, status: "pending", created_at: new Date().toISOString() };
+    const tempMsg: Message = { id: `temp-${Date.now()}`, role: "user", content: displayText, status: "pending", recipient, created_at: new Date().toISOString() };
     setMessages((prev) => [...prev, tempMsg]);
     try {
       const result = await sendMessage(text || "What's in this image?", conversationId || undefined, image || undefined, recipient);
@@ -245,6 +246,7 @@ export default function ChatScreen() {
     const isQwen = item.source === "qwenboy";
     const isRiff = item.source === "riffbot";
     const isVex = item.source === "vex";
+    const isIsaac = item.source === "isaac";
     const isPending = item.status === "pending" || item.status === "processing";
     const isSpeaking = speakingMessageId === item.id && activeSpeaker !== null;
     const canSpeak = !isUser && !isPending && ttsEnabled;
@@ -253,6 +255,7 @@ export default function ChatScreen() {
       : isRiff ? "RIFFBOT"
       : isQwen ? "QWENBOY"
       : isVex ? "VEX"
+      : isIsaac ? "ISAAC"
       : item.source === "terminal" ? "KIRA · TERMINAL"
       : "KIRA";
 
@@ -263,6 +266,7 @@ export default function ChatScreen() {
         isQwen && styles.qwenBubble,
         isRiff && styles.riffBubble,
         isVex && styles.vexBubble,
+        isIsaac && styles.isaacBubble,
         isSpeaking && styles.speakingBubble,
       ]}>
         <View style={styles.senderRow}>
@@ -272,6 +276,7 @@ export default function ChatScreen() {
             isQwen && styles.qwenLabel,
             isRiff && styles.riffLabel,
             isVex && styles.vexLabel,
+            isIsaac && styles.isaacLabel,
           ]}>
             {senderName}
           </Text>
@@ -283,7 +288,7 @@ export default function ChatScreen() {
             </View>
           )}
           {canSpeak && !isSpeaking && (
-            <Pressable onPress={() => audioQueue.enqueue(item.content, isQwen ? "qwenboy" : isVex ? "vex" : "kira", item.id)} hitSlop={8}>
+            <Pressable onPress={() => audioQueue.enqueue(item.content, isQwen ? "qwenboy" : isVex ? "vex" : isIsaac ? "isaac" : "kira", item.id)} hitSlop={8}>
               <Text style={styles.speakerIcon}>▸</Text>
             </Pressable>
           )}
@@ -366,7 +371,7 @@ export default function ChatScreen() {
                 addressee for the NEXT outbound message. Current selection
                 renders in primary red; the others sit as faint textSecondary. */}
             <View style={styles.recipientPicker}>
-              {(["kira", "both", "vex"] as Recipient[]).map((r, i) => (
+              {(["kira", "both", "vex", "isaac"] as Recipient[]).map((r, i) => (
                 <React.Fragment key={r}>
                   {i > 0 && <Text style={styles.recipientDivider}>|</Text>}
                   <Pressable onPress={() => setRecipient(r)} hitSlop={8}>
@@ -374,6 +379,7 @@ export default function ChatScreen() {
                       styles.recipientOption,
                       recipient === r && styles.recipientOptionActive,
                       recipient === r && r === "vex" && styles.recipientOptionActiveVex,
+                      recipient === r && r === "isaac" && styles.recipientOptionActiveIsaac,
                     ]}>
                       {r.toUpperCase()}
                     </Text>
@@ -396,11 +402,25 @@ export default function ChatScreen() {
         </>
       )}
 
-      {/* Messages */}
+      {/* Messages — filter to only show the currently-selected recipient's thread.
+          Kira's thread = messages Eric sent to Kira (or legacy untagged) + Kira's replies.
+          Other agents analogous. "both" shows everything.
+          Fixed 2026-04-21. */}
       {!isHandsFree && (
         <FlatList
           ref={flatListRef}
-          data={[...messages].reverse()}
+          data={[...messages].filter((m) => {
+            if (recipient === "both") return true;
+            if (m.role === "user") {
+              // Eric's message. Show if addressed to current recipient, or untagged legacy (treat as kira).
+              const r = m.recipient || "kira";
+              return r === recipient || r === "both";
+            }
+            // Assistant message. Show if its source matches the current recipient.
+            // Back-compat: messages without a source (old rows) default to kira.
+            const src = m.source || "kira";
+            return src === recipient;
+          }).reverse()}
           inverted
           renderItem={renderMessage}
           keyExtractor={(item) => item.id}
@@ -556,6 +576,9 @@ const styles = StyleSheet.create({
   vexBubble: {
     backgroundColor: Colors.vexBubble,
   },
+  isaacBubble: {
+    backgroundColor: Colors.isaacBubble,
+  },
   speakingBubble: {
     borderWidth: 1,
     borderColor: Colors.primary,
@@ -583,6 +606,9 @@ const styles = StyleSheet.create({
   vexLabel: {
     color: Colors.vexLabel,
   },
+  isaacLabel: {
+    color: Colors.isaacLabel,
+  },
   recipientPicker: {
     flexDirection: "row",
     alignItems: "center",
@@ -601,6 +627,9 @@ const styles = StyleSheet.create({
   },
   recipientOptionActiveVex: {
     color: Colors.vexLabel,
+  },
+  recipientOptionActiveIsaac: {
+    color: Colors.isaacLabel,
   },
   recipientDivider: {
     color: Colors.textFaint,
