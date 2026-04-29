@@ -24,7 +24,7 @@ export type TTSEngine = "mithra" | "voxtral" | "elevenlabs" | "system" | "none";
 
 // Mithra (home Qwen3-TTS 1.7B Kira fine-tune — exposed via Cloudflare Tunnel)
 // No timeouts, no skip-windows: fallback only on real failure (HTTP 4xx/5xx, fetch errors, malformed audio).
-const MITHRA_TTS_URL = "https://item-positive-lake-marie.trycloudflare.com/tts";
+const MITHRA_TTS_URL = "https://mithra.tail9667d2.ts.net/tts";
 const MITHRA_API_KEY = "1e393a1a659a61e45f92381f55c41cec439affa1b999bd1378441d0d242db839";
 
 // Fire-and-forget telemetry POST so we can trace which branch of the TTS chain fired.
@@ -131,12 +131,16 @@ export async function speak(text: string, speaker: "kira" | "qwenboy" | "riffbot
     await initializePiperTTS();
   }
 
-  // Try Mithra first for Kira's own voice only (QwenBoy / RiffBot still route through Voxtral).
+  // Kira's voice: Mithra-only. Either it works or the message goes silent.
+  // Per Eric 2026-04-28: removed Voxtral/ElevenLabs fallback for kira speaker — the system
+  // is Mithra; if the tunnel/service is down we want to KNOW, not silently degrade.
+  // QwenBoy / RiffBot still route through Voxtral with their own ref audio.
   // No separate /health probe — a successful /tts IS the probe. Cuts the round-trip.
   if (speaker === "kira") {
     const ok = await speakWithMithra(text);
     if (ok) return;
-    logTTS("mithra.fallthrough", { next: "voxtral" });
+    logTTS("mithra.failed-no-fallback", { speaker, chars: text.length });
+    return;
   }
 
   const ref = speaker === "qwenboy" ? qwenRefAudioBase64 : speaker === "riffbot" ? riffRefAudioBase64 : refAudioBase64;

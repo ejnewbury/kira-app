@@ -26,6 +26,17 @@ import ControlsScreen from "./lib/screens/ControlsScreen";
 import AlertsScreen from "./lib/screens/AlertsScreen";
 import ChessScreen from "./lib/screens/ChessScreen";
 import ConferenceScreen from "./lib/screens/ConferenceScreen";
+import CallKiraScreen from "./lib/screens/CallKiraScreen";
+
+// --- Call mode (app-level overlay) ---
+let setCallScreenVisibleRef: ((visible: boolean) => void) | null = null;
+
+export function openCallScreen() {
+  setCallScreenVisibleRef?.(true);
+}
+export function closeCallScreen() {
+  setCallScreenVisibleRef?.(false);
+}
 
 // --- Chess move routing (app-level, survives screen switches) ---
 let pendingChessMoveResolve: ((move: string | null) => void) | null = null;
@@ -119,8 +130,15 @@ function NavBar({
 function AppContent() {
   const [screen, setScreen] = useState<ScreenName>("home");
   const [prevScreen, setPrevScreen] = useState<ScreenName | null>(null);
+  const [callScreenVisible, setCallScreenVisible] = useState(false);
   const transitionAnim = useRef(new Animated.Value(1)).current;
   const transitioning = useRef(false);
+
+  // Wire the module-level call-screen toggle (so any component can open the call overlay)
+  useEffect(() => {
+    setCallScreenVisibleRef = setCallScreenVisible;
+    return () => { setCallScreenVisibleRef = null; };
+  }, []);
 
   // Hide Android system navigation bar — immersive mode
   useEffect(() => {
@@ -217,6 +235,11 @@ function AppContent() {
         {renderScreen()}
       </Animated.View>
       <NavBar current={screen} onNavigate={navigate} />
+      {callScreenVisible && (
+        <View style={StyleSheet.absoluteFill}>
+          <CallKiraScreen onClose={() => setCallScreenVisible(false)} />
+        </View>
+      )}
     </View>
   );
 }

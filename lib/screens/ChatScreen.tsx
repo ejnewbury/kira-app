@@ -32,6 +32,7 @@ import { registerForPushNotifications } from "../notifications";
 import * as ImagePicker from "expo-image-picker";
 import * as Clipboard from "expo-clipboard";
 import { Colors, Typography, Spacing } from "../theme";
+import { openCallScreen } from "../../App";
 
 let Audio: any = null;
 try { Audio = require("expo-av").Audio; } catch {}
@@ -416,9 +417,11 @@ export default function ChatScreen() {
               const r = m.recipient || "kira";
               return r === recipient || r === "both";
             }
-            // Assistant message. Show if its source matches the current recipient.
+            // Assistant message. Show if its effective source matches the current recipient.
+            // terminal/daemon/system all represent Kira herself (COO/auto replies) — collapse into "kira".
             // Back-compat: messages without a source (old rows) default to kira.
-            const src = m.source || "kira";
+            const rawSrc = m.source || "kira";
+            const src = (rawSrc === "terminal" || rawSrc === "daemon" || rawSrc === "system") ? "kira" : rawSrc;
             return src === recipient;
           }).reverse()}
           inverted
@@ -461,7 +464,7 @@ export default function ChatScreen() {
                 </View>
                 <Text style={styles.actionTrayLabel}>VOICE</Text>
               </Pressable>
-              <Pressable onPress={() => Linking.openURL("tel:+19789042979")} style={styles.actionTrayItem}>
+              <Pressable onPress={() => { setShowActions(false); openCallScreen(); }} style={styles.actionTrayItem}>
                 <Text style={styles.actionTrayIcon}>☎</Text>
                 <Text style={styles.actionTrayLabel}>CALL</Text>
               </Pressable>

@@ -16,6 +16,10 @@
     },
     "preview": {
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_KIRA_VOICE_BRIDGE_URL": "https://mithra.tail9667d2.ts.net:8004",
+        "EXPO_PUBLIC_KIRA_VOICE_BRIDGE_TOKEN": "8a6fd3f1e9b27c4d5a8e9f0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+      },
       "android": {
         "buildType": "apk",
         "credentialsSource": "local",
@@ -24,6 +28,10 @@
     },
     "production": {
       "channel": "production",
+      "env": {
+        "EXPO_PUBLIC_KIRA_VOICE_BRIDGE_URL": "https://mithra.tail9667d2.ts.net:8004",
+        "EXPO_PUBLIC_KIRA_VOICE_BRIDGE_TOKEN": "8a6fd3f1e9b27c4d5a8e9f0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d"
+      },
       "android": {
         "buildType": "apk",
         "credentialsSource": "local",
