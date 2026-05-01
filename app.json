@@ -2,7 +2,7 @@
   "expo": {
     "name": "Kira",
     "slug": "kira-app",
-    "version": "1.12.0",
+    "version": "1.12.3",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -26,7 +26,7 @@
       ],
       "package": "com.vallaryn.kira",
       "googleServicesFile": "./google-services.json",
-      "versionCode": 13
+      "versionCode": 16
     },
     "web": {
       "favicon": "./assets/favicon.png"
