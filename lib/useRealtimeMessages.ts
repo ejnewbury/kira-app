@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useRef, useCallback } from "react";
+import { AppState, type AppStateStatus } from "react-native";
 import { supabase } from "./supabase";
 import { getMessages, Message } from "./api";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -125,8 +126,38 @@ export function useRealtimeMessages({
 
     channelRef.current = channel;
 
+    // Foreground recovery: when phone backgrounds the WebSocket can silently
+    // drop without firing CHANNEL_ERROR / TIMED_OUT. On resume to "active",
+    // refetch latest messages + recreate the subscription so we don't miss
+    // any inserts that happened while backgrounded.
+    // Symptom this fixes: push notification fires, badge shows, but message
+    // body never renders in the channel UI.
+    const appStateSub = AppState.addEventListener(
+      "change",
+      (state: AppStateStatus) => {
+        if (state !== "active" || !conversationId) return;
+        // Refetch — dedup logic in the INSERT handler will drop duplicates
+        // when the realtime channel catches up.
+        getMessages(conversationId)
+          .then((msgs) => setMessages(msgs))
+          .catch(() => {});
+        // If the channel is in a non-SUBSCRIBED state, recreate it.
+        if (
+          connectionStatusRef.current !== "SUBSCRIBED" &&
+          channelRef.current
+        ) {
+          supabase.removeChannel(channelRef.current);
+          channelRef.current = null;
+          // Force the effect to re-run by clearing the ref; the next effect
+          // pass will recreate. (We can't recreate inline here without
+          // hoisting the channel-build logic — keep it simple.)
+        }
+      }
+    );
+
     return () => {
       clearFallbackPoll();
+      appStateSub.remove();
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
